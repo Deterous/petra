@@ -3,12 +3,12 @@
 Tool for video game archival and analysis of PS Vita cartridge dumps.
 
 ### PSV extraction
-Extracts files from a PSV image, creates a zstd-compressed skeleton, and a list of file hashes/sizes/offsets.
+Extracts files from a decrypted raw image, creates a zstd-compressed skeleton, and a list of file hashes/sizes/offsets.
 
-usage: `petra.exe example.psv`
+usage: `petra.exe example.img`
 
 ### PSV rebuilding
-Rebuilds a PSV file given a folder of files, the original skeleton (`example.skeleton.zst`), and the list of file hashes (`example.files.tsv`).
+Rebuilds a img file given a folder of files, the original skeleton (`example.skeleton.zst`), and the list of file hashes (`example.files.tsv`).
 
 usage: `petra.exe example/`
 
