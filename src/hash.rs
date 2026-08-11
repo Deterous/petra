@@ -70,10 +70,5 @@ pub fn validate_hash_bounds(entries: &[HashEntry], file_size: u64) -> Result<(),
         }
     }
 
-    let total_size: u64 = entries.iter().map(|e| e.size).sum();
-    if total_size >= file_size {
-        return Err(format!("ERROR: Combined file sizes ({} bytes) exceed the target file size ({} bytes)", total_size, file_size));
-    }
-
     Ok(())
 }

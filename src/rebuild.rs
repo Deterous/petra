@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use sha1::{Digest, Sha1};
 
+use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
+use crate::header;
 use crate::skeleton;
 
 struct ScannedFile {
@@ -143,26 +145,75 @@ fn hash_file(path: &Path) -> Result<String, String> {
 }
 
 fn insert_files(output_path: &Path, entries: &[HashEntry], matches: &HashMap<usize, PathBuf>) -> Result<(), String> {
-    let file = std::fs::OpenOptions::new().write(true).open(output_path).map_err(|e| format!("ERROR: Failed to open img for inserting: {}", e))?;
-    let mut writer = BufWriter::new(file);
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(output_path).map_err(|e| format!("ERROR: Failed to open img for inserting: {}", e))?;
+    let file_size = file.metadata().map_err(|e| format!("ERROR: Failed to get output metadata: {}", e))?.len();
+    let mut rw = BufWriter::new(file);
 
-    for (idx, entry) in entries.iter().enumerate() {
-        let file_path = &matches[&idx];
-        let offset = entry.offset * 512;
+    rw.seek(SeekFrom::Start(0)).map_err(|e| format!("ERROR: Failed to seek to header: {}", e))?;
+    let mut header_buf = [0u8; 512];
+    rw.get_mut().read_exact(&mut header_buf).map_err(|e| format!("ERROR: Failed to read header: {}", e))?;
 
-        writer.seek(SeekFrom::Start(offset)).map_err(|e| format!("ERROR: Failed to seek to offset {}: {}", offset, e))?;
+    let img_header = header::parse(&mut &header_buf[..], file_size)?;
 
-        let mut source = File::open(file_path).map_err(|e| format!("ERROR: Failed to open {}: {}", file_path.display(), e))?;
-        let mut buf = [0u8; 64 * 1024];
-        let mut remaining = entry.size;
-        while remaining > 0 {
-            let to_read = remaining.min(buf.len() as u64) as usize;
-            source.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read {}: {}", file_path.display(), e))?;
-            writer.write_all(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write file data: {}", e))?;
-            remaining -= to_read as u64;
+    let cluster_size = CLUSTER_SIZE as u64;
+    let mut offset_to_chain: HashMap<u64, (u64, u32, Vec<u32>)> = HashMap::new();
+
+    for partition in &img_header.partitions {
+        if partition.filesystem != header::FileSystem::ExFat {
+            continue;
+        }
+        let partition_start = partition.offset as u64 * 512;
+        let partition_size = partition.size as u64 * 512;
+
+        let ctx = exfat::parse_seekable(rw.get_mut(), partition_start, partition_size)?;
+        let heap_byte_offset = partition_start + ctx.cluster_heap_offset_sectors as u64 * BYTES_PER_SECTOR as u64;
+
+        for file_info in &ctx.files {
+            if let Some(&first_cluster) = file_info.chain.first() {
+                let first_cluster_byte = heap_byte_offset + (first_cluster as u64 - 2) * cluster_size;
+                let sector_offset = first_cluster_byte / 512;
+                offset_to_chain.insert(sector_offset, (partition_start, ctx.cluster_heap_offset_sectors, file_info.chain.clone()));
+            }
         }
     }
 
-    writer.flush().map_err(|e| format!("ERROR: Failed to flush output: {}", e))?;
+    for (idx, entry) in entries.iter().enumerate() {
+        let file_path = &matches[&idx];
+
+        let mut source = File::open(file_path).map_err(|e| format!("ERROR: Failed to open {}: {}", file_path.display(), e))?;
+        let mut buf = vec![0u8; CLUSTER_SIZE as usize];
+
+        if let Some((partition_start, cluster_heap_offset_sectors, chain)) = offset_to_chain.get(&entry.offset) {
+            let heap_byte_offset = partition_start + *cluster_heap_offset_sectors as u64 * BYTES_PER_SECTOR as u64;
+            let mut remaining = entry.size;
+
+            for &cluster_num in chain {
+                if remaining == 0 {
+                    break;
+                }
+                let cluster_offset = heap_byte_offset + (cluster_num as u64 - 2) * cluster_size;
+                let to_write = remaining.min(cluster_size) as usize;
+
+                source.read_exact(&mut buf[..to_write]).map_err(|e| format!("ERROR: Failed to read {}: {}", file_path.display(), e))?;
+                rw.seek(SeekFrom::Start(cluster_offset)).map_err(|e| format!("ERROR: Failed to seek to cluster {}: {}", cluster_num, e))?;
+                rw.write_all(&buf[..to_write]).map_err(|e| format!("ERROR: Failed to write cluster {}: {}", cluster_num, e))?;
+
+                remaining -= to_write as u64;
+            }
+        } else {
+            let offset = entry.offset * 512;
+            rw.seek(SeekFrom::Start(offset)).map_err(|e| format!("ERROR: Failed to seek to offset {}: {}", offset, e))?;
+
+            let mut remaining = entry.size;
+            while remaining > 0 {
+                let to_read = remaining.min(buf.len() as u64) as usize;
+                source.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read {}: {}", file_path.display(), e))?;
+                rw.write_all(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write file data: {}", e))?;
+                remaining -= to_read as u64;
+            }
+        }
+    }
+
+    rw.flush().map_err(|e| format!("ERROR: Failed to flush output: {}", e))?;
     Ok(())
 }
