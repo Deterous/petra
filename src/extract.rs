@@ -134,10 +134,41 @@ fn copy_region(reader: &mut impl Read, writer: &mut SkeletonWriter, offset: u64,
 }
 
 fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, end: u64) -> Result<(), String> {
-    let all_zeros = copy_region(reader, writer, start, end - start)?;
-    if !all_zeros {
-        eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, end);
+    let unk_start = 0x1C00;
+    let unk_end = 0x1C00 + 0x260;
+
+    if unk_start >= start && unk_start < end {
+        if unk_start > start {
+            let all_zeros = copy_region(reader, writer, start, unk_start - start)?;
+            if !all_zeros {
+                eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, unk_start);
+            }
+        }
+
+        let unk_region_end = unk_end.min(end);
+        let unk_len = unk_region_end - unk_start;
+        let mut unk_buf = vec![0u8; unk_len as usize];
+        reader.read_exact(&mut unk_buf).map_err(|e| format!("ERROR: Failed to read UNK region at 0x{:X}: {}", unk_start, e))?;
+
+        if unk_buf.iter().any(|&b| b != 0) {
+            eprintln!("Wiped unique header data from skeleton");
+        }
+
+        writer.write_zeros(unk_len).map_err(|e| format!("ERROR: Failed to write zeros for UNK region: {}", e))?;
+
+        if unk_region_end < end {
+            let all_zeros = copy_region(reader, writer, unk_region_end, end - unk_region_end)?;
+            if !all_zeros {
+                eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", unk_region_end, end);
+            }
+        }
+    } else {
+        let all_zeros = copy_region(reader, writer, start, end - start)?;
+        if !all_zeros {
+            eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, end);
+        }
     }
+
     Ok(())
 }
 
@@ -164,6 +195,16 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
     let mut hashers: Vec<Sha1> = (0..num_files).map(|_| Sha1::new()).collect();
     let mut remaining_bytes: Vec<u64> = ctx.files.iter().map(|f| f.size).collect();
     let mut file_writers: Vec<Option<BufWriter<File>>> = Vec::with_capacity(num_files);
+
+    let is_license_rif: Vec<bool> = ctx
+        .files
+        .iter()
+        .map(|f| {
+            let parts: Vec<&str> = f.path.trim_start_matches('/').split('/').collect();
+            parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") && parts[3].ends_with(".rif")
+        })
+        .collect();
+
     for file_info in &ctx.files {
         let relative_path = file_info.path.trim_start_matches('/');
         let out_path = extract_dir.join(relative_path);
@@ -202,6 +243,14 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
             let remaining = remaining_bytes[file_idx];
             if remaining > 0 {
                 let bytes_to_hash = remaining.min(actual_size as u64) as usize;
+                let file_offset = ctx.files[file_idx].size - remaining;
+
+                if is_license_rif[file_idx] {
+                    if wipe_license_data(&mut cluster_buf, file_offset, bytes_to_hash) {
+                        eprintln!("Wiped unique license data from {}", ctx.files[file_idx].path);
+                    }
+                }
+
                 hashers[file_idx].update(&cluster_buf[..bytes_to_hash]);
                 if let Some(ref mut w) = file_writers[file_idx] {
                     w.write_all(&cluster_buf[..bytes_to_hash]).map_err(|e| format!("ERROR: Failed to write file data: {}", e))?;
@@ -256,4 +305,27 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
     println!("exFAT partition at 0x{:X}: {} files extracted", partition_start, ctx.files.len());
 
     Ok(())
+}
+
+fn wipe_license_data(buf: &mut [u8], file_offset: u64, chunk_len: usize) -> bool {
+    const LIC1_START: u64 = 0x50;
+    const LIC1_END: u64 = 0x50 + 0x10;
+    const LIC2_START: u64 = 0xA0;
+    const LIC2_END: u64 = 0xA0 + 0x160;
+
+    let a = zero_range(buf, file_offset, chunk_len, LIC1_START, LIC1_END);
+    let b = zero_range(buf, file_offset, chunk_len, LIC2_START, LIC2_END);
+    a || b
+}
+
+fn zero_range(buf: &mut [u8], file_offset: u64, chunk_len: usize, range_start: u64, range_end: u64) -> bool {
+    let chunk_end = file_offset + chunk_len as u64;
+    if range_end <= file_offset || range_start >= chunk_end {
+        return false;
+    }
+    let start = range_start.saturating_sub(file_offset) as usize;
+    let end = (range_end - file_offset).min(chunk_len as u64) as usize;
+    let had_data = buf[start..end].iter().any(|&b| b != 0);
+    buf[start..end].fill(0);
+    had_data
 }
