@@ -12,6 +12,8 @@ Rebuilds a .img file given a folder of files, the original skeleton (`example.sk
 
 usage: `petra.exe example/`
 
+**Note**: Rebuilding may produce bad images for non-contiguous files in the exFAT partition. A future update will account for this.
+
 ### Validation
 Validate a folder of files given an existing list of file hashes (`example.files.tsv`)
 
