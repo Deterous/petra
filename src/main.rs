@@ -13,7 +13,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 || args.len() > 3 {
-        println!("PSVita extract/rebuild/analyze (c) Deterous 2026");
+        println!("PSVita extract/transform/rebuild/analyze (c) Deterous 2026");
         #[cfg(windows)]
         println!("Usage: petra.exe <path> [license.rif]");
         #[cfg(not(windows))]
