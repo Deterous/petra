@@ -2,6 +2,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+const HEADER_SKIP: u64 = 512;
+
 use sha1::{Digest, Sha1};
 
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
@@ -20,9 +22,20 @@ pub fn run(path: &Path) -> Result<(), String> {
 
     let mut reader = BufReader::new(file);
 
-    let psv_header = header::parse(&mut reader, file_size)?;
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).map_err(|e| format!("ERROR: Failed to read magic: {}", e))?;
+    let data_offset = if &magic == b"PSV\0" || &magic == b"VCI\0" {
+        reader.seek(SeekFrom::Start(HEADER_SKIP)).map_err(|e| format!("ERROR: Failed to seek past header: {}", e))?;
+        HEADER_SKIP
+    } else {
+        reader.seek(SeekFrom::Start(0)).map_err(|e| format!("ERROR: Failed to seek to start: {}", e))?;
+        0
+    };
+    let data_size = file_size - data_offset;
 
-    psv_header.print(file_size);
+    let psv_header = header::parse(&mut reader, data_size)?;
+
+    psv_header.print(data_size);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_stem().ok_or("ERROR: Can't get file name")?.to_string_lossy();
@@ -54,7 +67,7 @@ pub fn run(path: &Path) -> Result<(), String> {
 
         match partition.filesystem {
             FileSystem::ExFat => {
-                process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &extract_dir)?;
+                process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &extract_dir, data_offset)?;
             }
             _ => {
                 process_raw(&mut reader, &mut skeleton_writer, partition)?;
@@ -64,8 +77,29 @@ pub fn run(path: &Path) -> Result<(), String> {
         pos = partition_start + partition_size;
     }
 
-    if pos < file_size {
-        process_gap(&mut reader, &mut skeleton_writer, pos, file_size)?;
+    let header_size = psv_header.image_size() as u64 * BLOCK_SIZE;
+
+    if pos < header_size.min(data_size) {
+        process_gap(&mut reader, &mut skeleton_writer, pos, header_size.min(data_size))?;
+    }
+
+    if data_size < header_size {
+        skeleton_writer.write_zeros(header_size - data_size).map_err(|e| format!("ERROR: Failed to write padding zeros: {}", e))?;
+    } else if data_size > header_size {
+        let mut buf = vec![0u8; CHUNK_SIZE as usize];
+        let mut remaining = data_size - header_size.max(pos);
+        let mut has_nonzero = false;
+        while remaining > 0 {
+            let to_read = remaining.min(CHUNK_SIZE as u64) as usize;
+            reader.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read trailing data: {}", e))?;
+            if !has_nonzero && buf[..to_read].iter().any(|&b| b != 0) {
+                has_nonzero = true;
+            }
+            remaining -= to_read as u64;
+        }
+        if has_nonzero {
+            eprintln!("WARNING: File has {} bytes of non-zero data past the header image size", data_size - header_size);
+        }
     }
 
     skeleton_writer.finish().map_err(|e| format!("ERROR: Failed to finalize skeleton: {}", e))?;
@@ -119,11 +153,11 @@ fn process_raw(reader: &mut impl Read, writer: &mut SkeletonWriter, partition: &
     Ok(())
 }
 
-fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, partition: &Partition, hash_entries: &mut Vec<HashEntry>, extract_dir: &Path) -> Result<(), String> {
+fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, partition: &Partition, hash_entries: &mut Vec<HashEntry>, extract_dir: &Path, data_offset: u64) -> Result<(), String> {
     let partition_start = partition.offset as u64 * BLOCK_SIZE;
     let partition_size = partition.size as u64 * BLOCK_SIZE;
 
-    let ctx = exfat::parse_seekable(reader, partition_start, partition_size)?;
+    let ctx = exfat::parse_seekable(reader, data_offset + partition_start, partition_size)?;
     let cluster_to_file = exfat::build_cluster_map(&ctx.files);
 
     let num_files = ctx.files.len();
@@ -143,7 +177,7 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
     let cluster_size = CLUSTER_SIZE as usize;
     let cluster_heap_start = ctx.cluster_heap_offset_sectors as u64 * BYTES_PER_SECTOR as u64;
 
-    reader.seek(SeekFrom::Start(partition_start)).map_err(|e| format!("ERROR: Failed to seek back to partition start: {}", e))?;
+    reader.seek(SeekFrom::Start(data_offset + partition_start)).map_err(|e| format!("ERROR: Failed to seek back to partition start: {}", e))?;
 
     let pre_heap_size = cluster_heap_start as usize;
     let mut buf = vec![0u8; CHUNK_SIZE];

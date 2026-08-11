@@ -20,7 +20,7 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
     let skeleton_zst_path = parent.join(format!("{}.skeleton.zst", name));
     let skeleton_raw_path = parent.join(format!("{}.skeleton", name));
     let hash_path = parent.join(format!("{}.files.tsv", name));
-    let output_path = parent.join(format!("{}.psv", name));
+    let output_path = parent.join(format!("{}.img", name));
 
     if output_path.exists() {
         return Err(format!("ERROR: Output file already exists: {}", output_path.display()));
@@ -143,7 +143,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
 }
 
 fn insert_files(output_path: &Path, entries: &[HashEntry], matches: &HashMap<usize, PathBuf>) -> Result<(), String> {
-    let file = std::fs::OpenOptions::new().write(true).open(output_path).map_err(|e| format!("ERROR: Failed to open psv for inserting: {}", e))?;
+    let file = std::fs::OpenOptions::new().write(true).open(output_path).map_err(|e| format!("ERROR: Failed to open img for inserting: {}", e))?;
     let mut writer = BufWriter::new(file);
 
     for (idx, entry) in entries.iter().enumerate() {

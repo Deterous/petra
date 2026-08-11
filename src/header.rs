@@ -43,12 +43,12 @@ pub struct Partition {
     pub flags: u32,
 }
 
-pub struct PsvHeader {
+pub struct ImgHeader {
     pub raw: [u8; HEADER_SIZE],
     pub partitions: Vec<Partition>,
 }
 
-impl PsvHeader {
+impl ImgHeader {
     pub fn version(&self) -> u32 {
         u32::from_le_bytes([self.raw[0x20], self.raw[0x21], self.raw[0x22], self.raw[0x23]])
     }
@@ -158,18 +158,18 @@ fn parse_partitions(header_raw: &[u8; HEADER_SIZE], file_size: u64) -> Result<Ve
     Ok(entries)
 }
 
-pub fn parse(reader: &mut impl Read, file_size: u64) -> Result<PsvHeader, String> {
+pub fn parse(reader: &mut impl Read, file_size: u64) -> Result<ImgHeader, String> {
     const MAGIC: &[u8; 32] = b"Sony Computer Entertainment Inc.";
 
     let mut raw = [0u8; HEADER_SIZE];
 
-    reader.read_exact(&mut raw).map_err(|e| format!("ERROR: Failed to read PSV header: {}", e))?;
+    reader.read_exact(&mut raw).map_err(|e| format!("ERROR: Failed to read image header: {}", e))?;
 
     if &raw[0x00..0x20] != MAGIC.as_slice() {
-        return Err("ERROR: Invalid PSV file".to_string());
+        return Err("ERROR: Invalid cart dump file".to_string());
     }
 
     let partitions = parse_partitions(&raw, file_size)?;
 
-    Ok(PsvHeader { raw, partitions })
+    Ok(ImgHeader { raw, partitions })
 }
