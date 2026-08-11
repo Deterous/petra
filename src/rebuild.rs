@@ -15,7 +15,7 @@ struct ScannedFile {
     size: u64,
 }
 
-pub fn run(input_dir: &Path) -> Result<(), String> {
+pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> {
     let parent = input_dir.parent().unwrap_or(Path::new("."));
     let name = input_dir.file_name().ok_or("Cannot determine folder name")?.to_string_lossy();
 
@@ -39,7 +39,24 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
     let mut scanned_files = Vec::new();
     scan_recursive(input_dir, &mut scanned_files)?;
 
-    let matches = match_files(&scanned_files, &hash_entries, &expected_sizes)?;
+    let mut matches = match_files(&scanned_files, &hash_entries, &expected_sizes)?;
+
+    if let Some(lic_path) = license_path {
+        let lic_meta = std::fs::metadata(lic_path).map_err(|e| format!("ERROR: Failed to read license file {}: {}", lic_path.display(), e))?;
+        let lic_size = lic_meta.len();
+
+        for (idx, entry) in hash_entries.iter().enumerate() {
+            let parts: Vec<&str> = entry.path.trim_start_matches('/').split('/').collect();
+            let is_license_rif = parts.len() == 4
+                && parts[0].eq_ignore_ascii_case("license")
+                && parts[1].eq_ignore_ascii_case("app")
+                && parts[3].ends_with(".rif");
+            if entry.size == lic_size && is_license_rif {
+                println!("Using license override for: {}", entry.path);
+                matches.insert(idx, lic_path.to_path_buf());
+            }
+        }
+    }
 
     if matches.len() != hash_entries.len() {
         let mut unmatched = Vec::new();

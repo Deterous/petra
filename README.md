@@ -12,6 +12,10 @@ Rebuilds a .img file given a folder of files, the original skeleton (`example.sk
 
 usage: `petra.exe example/`
 
+You can also force rebuilding the img with a different license .rif file even if it doesn't match the provided hash.
+
+usage: `petra.exe example/ license.rif`
+
 ### Validation
 Validate a folder of files given an existing list of file hashes (`example.files.tsv`)
 
