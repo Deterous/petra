@@ -1,0 +1,16 @@
+[package]
+name = "petra"
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+zstd = "0.13"
+sha1 = "0.11"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

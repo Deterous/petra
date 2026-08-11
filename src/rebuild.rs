@@ -1,0 +1,168 @@
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use sha1::{Digest, Sha1};
+
+use crate::hash::{self, HashEntry};
+use crate::skeleton;
+
+struct ScannedFile {
+    path: PathBuf,
+    size: u64,
+}
+
+pub fn run(input_dir: &Path) -> Result<(), String> {
+    let parent = input_dir.parent().unwrap_or(Path::new("."));
+    let name = input_dir.file_name().ok_or("Cannot determine folder name")?.to_string_lossy();
+
+    let skeleton_zst_path = parent.join(format!("{}.skeleton.zst", name));
+    let skeleton_raw_path = parent.join(format!("{}.skeleton", name));
+    let hash_path = parent.join(format!("{}.files.tsv", name));
+    let output_path = parent.join(format!("{}.psv", name));
+
+    if output_path.exists() {
+        return Err(format!("ERROR: Output file already exists: {}", output_path.display()));
+    }
+
+    if !hash_path.exists() {
+        return Err(format!("ERROR: Hash file not found: {}", hash_path.display()));
+    }
+
+    let hash_entries = hash::read_hash_file(&hash_path)?;
+
+    let expected_sizes: HashSet<u64> = hash_entries.iter().map(|e| e.size).collect();
+
+    let mut scanned_files = Vec::new();
+    scan_recursive(input_dir, &mut scanned_files)?;
+
+    let matches = match_files(&scanned_files, &hash_entries, &expected_sizes)?;
+
+    if matches.len() != hash_entries.len() {
+        let mut unmatched = Vec::new();
+        for (idx, entry) in hash_entries.iter().enumerate() {
+            if !matches.contains_key(&idx) {
+                unmatched.push(entry);
+            }
+        }
+        let mut msg = format!("ERROR: Missing {} file(s) for rebuild:\n", unmatched.len());
+        for entry in &unmatched {
+            msg.push_str(&format!("  sha1={} size={} ({})\n", entry.sha1, entry.size, entry.path));
+        }
+        return Err(msg.trim_end().to_string());
+    }
+
+    let use_raw_skeleton = if skeleton_raw_path.exists() {
+        true
+    } else if skeleton_zst_path.exists() {
+        false
+    } else {
+        return Err(format!("ERROR: Skeleton file not found: {}", skeleton_zst_path.display()));
+    };
+
+    let file_size = if use_raw_skeleton { skeleton::read_image_size_raw(&skeleton_raw_path)? } else { skeleton::read_image_size(&skeleton_zst_path)? };
+
+    hash::validate_hash_bounds(&hash_entries, file_size)?;
+
+    if use_raw_skeleton {
+        std::fs::copy(&skeleton_raw_path, &output_path).map_err(|e| format!("ERROR: Failed to copy skeleton to output: {}", e))?;
+    } else {
+        skeleton::decompress_skeleton(&skeleton_zst_path, &output_path).map_err(|e| format!("ERROR: Failed to decompress skeleton {}: {}", skeleton_zst_path.display(), e))?;
+    }
+
+    if let Err(e) = insert_files(&output_path, &hash_entries, &matches) {
+        let _ = std::fs::remove_file(&output_path);
+        return Err(e);
+    }
+
+    println!("Rebuilt: {}", output_path.display());
+
+    Ok(())
+}
+
+fn scan_recursive(dir: &Path, files: &mut Vec<ScannedFile>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("ERROR: Failed to read directory {}: {}", dir.display(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("ERROR: Failed to read entry in {}: {}", dir.display(), e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            scan_recursive(&path, files)?;
+        } else if path.is_file() {
+            let metadata = std::fs::metadata(&path).map_err(|e| format!("ERROR: Failed to read metadata for {}: {}", path.display(), e))?;
+            files.push(ScannedFile { path, size: metadata.len() });
+        }
+    }
+    Ok(())
+}
+
+fn match_files(scanned: &[ScannedFile], entries: &[HashEntry], expected_sizes: &HashSet<u64>) -> Result<HashMap<usize, PathBuf>, String> {
+    let mut lookup: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        lookup.entry((&entry.sha1, entry.size)).or_default().push(idx);
+    }
+
+    let mut matches: HashMap<usize, PathBuf> = HashMap::new();
+
+    for file in scanned {
+        if !expected_sizes.contains(&file.size) {
+            continue;
+        }
+
+        let sha1 = hash_file(&file.path)?;
+
+        if let Some(entry_indices) = lookup.get(&(sha1.as_str(), file.size)) {
+            for &entry_idx in entry_indices {
+                matches.insert(entry_idx, file.path.clone());
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| format!("ERROR: Failed to open {}: {}", path.display(), e))?;
+    let mut hasher = Sha1::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("ERROR: Failed to read {}: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let hash = hasher.finalize();
+    let mut hex = String::with_capacity(40);
+    for byte in hash.iter() {
+        use std::fmt::Write;
+        write!(hex, "{:02x}", byte).unwrap();
+    }
+    Ok(hex)
+}
+
+fn insert_files(output_path: &Path, entries: &[HashEntry], matches: &HashMap<usize, PathBuf>) -> Result<(), String> {
+    let file = std::fs::OpenOptions::new().write(true).open(output_path).map_err(|e| format!("ERROR: Failed to open psv for inserting: {}", e))?;
+    let mut writer = BufWriter::new(file);
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let file_path = &matches[&idx];
+        let offset = entry.offset * 512;
+
+        writer.seek(SeekFrom::Start(offset)).map_err(|e| format!("ERROR: Failed to seek to offset {}: {}", offset, e))?;
+
+        let mut source = File::open(file_path).map_err(|e| format!("ERROR: Failed to open {}: {}", file_path.display(), e))?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut remaining = entry.size;
+        while remaining > 0 {
+            let to_read = remaining.min(buf.len() as u64) as usize;
+            source.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read {}: {}", file_path.display(), e))?;
+            writer.write_all(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write file data: {}", e))?;
+            remaining -= to_read as u64;
+        }
+    }
+
+    writer.flush().map_err(|e| format!("ERROR: Failed to flush output: {}", e))?;
+    Ok(())
+}
