@@ -62,35 +62,35 @@ impl ImgHeader {
 
         let device_size_bytes = self.image_size() as u64 * 512;
         if device_size_bytes != actual_file_size {
-            eprintln!("WARNING: Device size mismatch: header says {} bytes ({} blocks), actual file is {} bytes", device_size_bytes, self.image_size(), actual_file_size);
+            println!("WARNING: Device size mismatch: header says {} bytes ({} blocks), actual file is {} bytes", device_size_bytes, self.image_size(), actual_file_size);
         }
 
         if !is_region_zero(&self.raw, 0x28, 0x4F) {
-            eprintln!("WARNING: 0x28-0x4F contains non-zero data");
+            println!("WARNING: 0x28-0x4F contains non-zero data");
         }
 
         if !is_region_zero(&self.raw, 0x160, 0x1BD) {
-            eprintln!("WARNING: 0x160-0x1BD contains non-zero data");
+            println!("WARNING: 0x160-0x1BD contains non-zero data");
         }
 
         if !is_region_zero(&self.raw, 0x1BE, 0x1CD) {
-            eprintln!("WARNING: MBR partition 1 (0x1BE-0x1CD) contains non-zero data");
+            println!("WARNING: MBR partition 1 (0x1BE-0x1CD) contains non-zero data");
         }
 
         if !is_region_zero(&self.raw, 0x1CE, 0x1DD) {
-            eprintln!("WARNING: MBR partition 2 (0x1CE-0x1DD) contains non-zero data");
+            println!("WARNING: MBR partition 2 (0x1CE-0x1DD) contains non-zero data");
         }
 
         if !is_region_zero(&self.raw, 0x1DE, 0x1ED) {
-            eprintln!("WARNING: MBR partition 3 (0x1DE-0x1ED) contains non-zero data");
+            println!("WARNING: MBR partition 3 (0x1DE-0x1ED) contains non-zero data");
         }
 
         if !is_region_zero(&self.raw, 0x1EE, 0x1FD) {
-            eprintln!("WARNING: MBR partition 4 (0x1EE-0x1FD) contains non-zero data");
+            println!("WARNING: MBR partition 4 (0x1EE-0x1FD) contains non-zero data");
         }
 
         if self.raw[0x1FE] != 0x55 || self.raw[0x1FF] != 0xAA {
-            eprintln!("WARNING: Invalid MBR boot signature at 0x1FE: expected 55 AA, found {:02X} {:02X}", self.raw[0x1FE], self.raw[0x1FF]);
+            println!("WARNING: Invalid MBR boot signature at 0x1FE: expected 55 AA, found {:02X} {:02X}", self.raw[0x1FE], self.raw[0x1FF]);
         }
 
         for (i, entry) in self.partitions.iter().enumerate() {
@@ -130,7 +130,7 @@ fn parse_partitions(header_raw: &[u8; HEADER_SIZE], file_size: u64) -> Result<Ve
 
         let unknown = &entry_bytes[0xF..0x11];
         if unknown[0] != 0 || unknown[1] != 0 {
-            eprintln!("WARNING: Partition entry {} has non-zero bytes at offset 0xF: {:02X} {:02X}", i, unknown[0], unknown[1]);
+            println!("WARNING: Partition entry {} has non-zero bytes at offset 0xF: {:02X} {:02X}", i, unknown[0], unknown[1]);
         }
 
         entries.push(Partition { offset, size, code, filesystem, active, flags });

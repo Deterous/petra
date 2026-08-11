@@ -98,7 +98,7 @@ pub fn run(path: &Path) -> Result<(), String> {
             remaining -= to_read as u64;
         }
         if has_nonzero {
-            eprintln!("WARNING: File has {} bytes of non-zero data past the header image size", data_size - header_size);
+            println!("WARNING: File has {} bytes of non-zero data past the header image size", data_size - header_size);
         }
     }
 
@@ -141,7 +141,7 @@ fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, 
         if unk_start > start {
             let all_zeros = copy_region(reader, writer, start, unk_start - start)?;
             if !all_zeros {
-                eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, unk_start);
+                println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, unk_start);
             }
         }
 
@@ -151,7 +151,7 @@ fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, 
         reader.read_exact(&mut unk_buf).map_err(|e| format!("ERROR: Failed to read UNK region at 0x{:X}: {}", unk_start, e))?;
 
         if unk_buf.iter().any(|&b| b != 0) {
-            eprintln!("Wiped unique header data from skeleton");
+            println!("Wiped unique header data from skeleton");
         }
 
         writer.write_zeros(unk_len).map_err(|e| format!("ERROR: Failed to write zeros for UNK region: {}", e))?;
@@ -159,13 +159,13 @@ fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, 
         if unk_region_end < end {
             let all_zeros = copy_region(reader, writer, unk_region_end, end - unk_region_end)?;
             if !all_zeros {
-                eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", unk_region_end, end);
+                println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", unk_region_end, end);
             }
         }
     } else {
         let all_zeros = copy_region(reader, writer, start, end - start)?;
         if !all_zeros {
-            eprintln!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, end);
+            println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, end);
         }
     }
 
@@ -247,7 +247,7 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
 
                 if is_license_rif[file_idx] {
                     if wipe_license_data(&mut cluster_buf, file_offset, bytes_to_hash) {
-                        eprintln!("Wiped unique license data from {}", ctx.files[file_idx].path);
+                        println!("Wiped unique license data from {}", ctx.files[file_idx].path);
                     }
                 }
 
