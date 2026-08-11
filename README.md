@@ -7,6 +7,8 @@ Extracts files from .img/.vci/.psv cart images, creates a zstd-compressed skelet
 
 usage: `petra.exe example.img`
 
+**Note**: The skeleton's image header and extracted RIF file have their unique data zeroed to be deterministic.
+
 ### Rebuilding
 Rebuilds a .img file given a folder of files, the original skeleton (`example.skeleton.zst`), and the list of file hashes (`example.files.tsv`).
 
