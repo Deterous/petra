@@ -239,6 +239,36 @@ fn parse_partitions(header_raw: &[u8; HEADER_SIZE], file_size: u64) -> Result<Ve
     Ok(entries)
 }
 
+pub fn partition_names(partitions: &[Partition], extractable: fn(&FileSystem) -> bool) -> Vec<Option<String>> {
+    let mut code_totals: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in partitions.iter().filter(|p| extractable(&p.filesystem)) {
+        *code_totals.entry(p.code.name().unwrap_or("partition").to_string()).or_insert(0) += 1;
+    }
+    let extractable_count: usize = code_totals.values().sum();
+    let mut code_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut index: usize = 0;
+    partitions
+        .iter()
+        .map(|p| {
+            if !extractable(&p.filesystem) {
+                return None;
+            }
+            let base_name = p.code.name().unwrap_or("partition").to_string();
+            let name = if extractable_count > 1 {
+                let total = *code_totals.get(&base_name).unwrap_or(&1);
+                let count = code_counts.entry(base_name.clone()).or_insert(0);
+                let folder_name = if total > 1 { format!("{}{}", base_name, count) } else { base_name.clone() };
+                *count += 1;
+                folder_name
+            } else {
+                base_name
+            };
+            index += 1;
+            Some(name)
+        })
+        .collect()
+}
+
 pub fn parse(reader: &mut impl Read, file_size: u64) -> Result<ImgHeader, String> {
     const MAGIC: &[u8; 32] = b"Sony Computer Entertainment Inc.";
 

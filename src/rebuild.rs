@@ -7,7 +7,7 @@ use sha1::{Digest, Sha1};
 
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
-use crate::header;
+use crate::header::{self, FileSystem};
 use crate::skeleton;
 
 struct ScannedFile {
@@ -87,6 +87,16 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
         skeleton::decompress_skeleton(&skeleton_zst_path, &output_path).map_err(|e| format!("ERROR: Failed to decompress skeleton {}: {}", skeleton_zst_path.display(), e))?;
     }
 
+    let img_header = {
+        let mut f = File::open(&output_path).map_err(|e| format!("ERROR: Failed to open output to read header: {}", e))?;
+        header::parse(&mut f, file_size)?
+    };
+
+    if let Err(e) = insert_img_partitions(&output_path, &img_header, parent) {
+        let _ = std::fs::remove_file(&output_path);
+        return Err(e);
+    }
+
     if let Err(e) = insert_files(&output_path, &hash_entries, &matches) {
         let _ = std::fs::remove_file(&output_path);
         return Err(e);
@@ -94,6 +104,50 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
 
     println!("Rebuilt: {}", output_path.display());
 
+    Ok(())
+}
+
+fn insert_img_partitions(output_path: &Path, img_header: &header::ImgHeader, input_dir: &Path) -> Result<(), String> {
+    let mut partitions: Vec<header::Partition> = img_header.partitions.clone();
+    partitions.sort_by_key(|p| p.offset);
+    let names = header::partition_names(&partitions, |fs| !matches!(fs, FileSystem::ExFat));
+
+    let mut output = std::fs::OpenOptions::new().write(true).open(output_path).map_err(|e| format!("ERROR: Failed to open output for FAT16 insertion: {}", e))?;
+
+    for (partition, name) in partitions.iter().zip(names.iter()) {
+        if partition.filesystem == FileSystem::ExFat {
+            continue;
+        }
+        let name = match name {
+            Some(n) => n,
+            None => continue,
+        };
+        let img_path = input_dir.join(format!("{}.img", name));
+        let partition_offset = partition.offset as u64 * 512;
+        let partition_size = partition.size as u64 * 512;
+
+        if !img_path.exists() {
+            println!("Partition {} not found ({}), leaving zeroed", name, img_path.display());
+            continue;
+        }
+
+        let mut src = File::open(&img_path).map_err(|e| format!("ERROR: Failed to open {}: {}", img_path.display(), e))?;
+        let src_size = src.metadata().map_err(|e| format!("ERROR: Failed to stat {}: {}", img_path.display(), e))?.len();
+        if src_size != partition_size {
+            return Err(format!("ERROR: {} is {} bytes but partition expects {} bytes", img_path.display(), src_size, partition_size));
+        }
+
+        output.seek(SeekFrom::Start(partition_offset)).map_err(|e| format!("ERROR: Failed to seek to partition offset: {}", e))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut remaining = partition_size;
+        while remaining > 0 {
+            let to_read = remaining.min(buf.len() as u64) as usize;
+            src.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read {}: {}", img_path.display(), e))?;
+            output.write_all(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write partition: {}", e))?;
+            remaining -= to_read as u64;
+        }
+        println!("Inserted {} partition from {}", name, img_path.display());
+    }
     Ok(())
 }
 

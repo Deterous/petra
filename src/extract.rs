@@ -52,18 +52,12 @@ pub fn run(path: &Path) -> Result<(), String> {
 
     let mut partitions: Vec<&Partition> = psv_header.partitions.iter().collect();
     partitions.sort_by_key(|p| p.offset);
+    let sorted_partitions: Vec<Partition> = partitions.iter().map(|p| (*p).clone()).collect();
+    let part_names = header::partition_names(&sorted_partitions, |fs| !matches!(fs, FileSystem::ExFat));
 
     let mut pos: u64 = BLOCK_SIZE;
 
-    let exfat_count = partitions.iter().filter(|p| p.filesystem == FileSystem::ExFat).count();
-    let mut exfat_index: usize = 0;
-    let mut code_totals: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for p in partitions.iter().filter(|p| p.filesystem == FileSystem::ExFat) {
-        *code_totals.entry(p.code.name().unwrap_or("partition").to_string()).or_insert(0) += 1;
-    }
-    let mut code_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-    for partition in &partitions {
+    for (partition, part_name) in partitions.iter().zip(part_names.iter()) {
         let partition_start = partition.offset as u64 * BLOCK_SIZE;
         let partition_size = partition.size as u64 * BLOCK_SIZE;
 
@@ -75,24 +69,17 @@ pub fn run(path: &Path) -> Result<(), String> {
 
         match partition.filesystem {
             FileSystem::ExFat => {
-                let partition_extract_dir = if exfat_count > 1 {
-                    let base_name = match partition.code.name() {
-                        Some(name) => name.to_string(),
-                        None => format!("partition{}", exfat_index),
-                    };
-                    let total = *code_totals.get(&base_name).unwrap_or(&1);
-                    let count = code_counts.entry(base_name.clone()).or_insert(0);
-                    let folder_name = if total > 1 { format!("{}{}", base_name, count) } else { base_name.clone() };
-                    *count += 1;
-                    extract_dir.join(&folder_name)
-                } else {
-                    extract_dir.clone()
+                let partition_dir = match part_name {
+                    Some(name) => extract_dir.join(name),
+                    None => extract_dir.clone(),
                 };
-                exfat_index += 1;
-                process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &partition_extract_dir, data_offset)?;
+                let num_files = process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &partition_dir, data_offset)?;
+                let display_name = partition.code.name().unwrap_or("unknown");
+                println!("{}: {} files extracted", display_name, num_files);
             }
             _ => {
-                process_raw(&mut reader, &mut skeleton_writer, partition)?;
+                let img_path = part_name.as_ref().map(|name| extract_dir.join(format!("{}.img", name)));
+                process_non_exfat(&mut reader, &mut skeleton_writer, partition, img_path.as_deref())?;
             }
         }
 
@@ -198,11 +185,12 @@ fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, 
     Ok(())
 }
 
-fn process_raw(reader: &mut impl Read, writer: &mut SkeletonWriter, partition: &Partition) -> Result<(), String> {
+fn process_non_exfat(reader: &mut impl Read, writer: &mut SkeletonWriter, partition: &Partition, img_path: Option<&Path>) -> Result<(), String> {
     let partition_start = partition.offset as u64 * BLOCK_SIZE;
     let partition_size = partition.size as u64 * BLOCK_SIZE;
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut remaining = partition_size;
+    let mut data: Vec<u8> = if img_path.is_some() { Vec::with_capacity(partition_size as usize) } else { Vec::new() };
     let mut all_zeros = true;
     while remaining > 0 {
         let to_read = remaining.min(CHUNK_SIZE as u64) as usize;
@@ -210,16 +198,29 @@ fn process_raw(reader: &mut impl Read, writer: &mut SkeletonWriter, partition: &
         if all_zeros && buf[..to_read].iter().any(|&b| b != 0) {
             all_zeros = false;
         }
+        if img_path.is_some() {
+            data.extend_from_slice(&buf[..to_read]);
+        }
         remaining -= to_read as u64;
     }
-    if !all_zeros {
-        println!("{} partition at 0x{:X} ({} blocks): contains data, zeroed in skeleton", partition.filesystem, partition_start, partition.size);
-    }
     writer.write_zeros(partition_size).map_err(|e| format!("ERROR: Failed to write zeros for {} partition: {}", partition.filesystem, e))?;
+    if !all_zeros {
+        if let Some(path) = img_path {
+            std::fs::write(path, &data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
+            println!("{} partition at 0x{:X}: extracted to {}", partition.filesystem, partition_start, path.display());
+        }
+    }
     Ok(())
 }
 
-fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, partition: &Partition, hash_entries: &mut Vec<HashEntry>, extract_dir: &Path, data_offset: u64) -> Result<(), String> {
+fn process_exfat(
+    reader: &mut (impl Read + Seek),
+    writer: &mut SkeletonWriter,
+    partition: &Partition,
+    hash_entries: &mut Vec<HashEntry>,
+    extract_dir: &Path,
+    data_offset: u64,
+) -> Result<usize, String> {
     let partition_start = partition.offset as u64 * BLOCK_SIZE;
     let partition_size = partition.size as u64 * BLOCK_SIZE;
 
@@ -337,9 +338,7 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
         hash_entries.push(HashEntry { sha1, offset, size: file_info.size, path: file_info.path.clone() });
     }
 
-    println!("exFAT partition at 0x{:X}: {} files extracted", partition_start, ctx.files.len());
-
-    Ok(())
+    Ok(ctx.files.len())
 }
 
 fn read_bytes_at(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
