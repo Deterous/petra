@@ -8,7 +8,7 @@ use sha1::{Digest, Sha1};
 
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
-use crate::header::{self, FileSystem, Partition};
+use crate::header::{self, FileSystem, Partition, PartitionCode};
 use crate::skeleton::SkeletonWriter;
 
 pub(crate) const BLOCK_SIZE: u64 = 512;
@@ -44,6 +44,16 @@ pub fn run(path: &Path) -> Result<(), String> {
     let hash_path = parent.join(format!("{}.files.tsv", name));
     let extract_dir = parent.join(name.as_ref());
 
+    if skeleton_path.exists() {
+        return Err(format!("ERROR: {} already exists", skeleton_path.display()));
+    }
+    if hash_path.exists() {
+        return Err(format!("ERROR: {} already exists", hash_path.display()));
+    }
+    if extract_dir.exists() {
+        return Err(format!("ERROR: {} already exists", extract_dir.display()));
+    }
+
     let mut skeleton_writer = SkeletonWriter::new(&skeleton_path).map_err(|e| format!("ERROR: Failed to create skeleton: {}", e))?;
 
     skeleton_writer.write_bytes(&psv_header.raw).map_err(|e| format!("ERROR: Failed to write header to skeleton: {}", e))?;
@@ -53,7 +63,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     let mut partitions: Vec<&Partition> = psv_header.partitions.iter().collect();
     partitions.sort_by_key(|p| p.offset);
     let sorted_partitions: Vec<Partition> = partitions.iter().map(|p| (*p).clone()).collect();
-    let part_names = header::partition_names(&sorted_partitions, |fs| !matches!(fs, FileSystem::ExFat));
+    let part_names = header::partition_names(&sorted_partitions, |fs| matches!(fs, FileSystem::ExFat));
 
     let mut pos: u64 = BLOCK_SIZE;
 
@@ -118,7 +128,11 @@ pub fn run(path: &Path) -> Result<(), String> {
     println!("Created: {}", hash_path.display());
     println!("Created: {}", skeleton_path.display());
 
-    print_system_version(&extract_dir, &hash_entries);
+    let gamero_dir = part_names.iter().zip(sorted_partitions.iter()).find_map(|(name, p)| {
+        if matches!(p.code, PartitionCode::Gro0) { name.as_ref().map(|n| extract_dir.join(n)) } else { None }
+    });
+    let game_dir = gamero_dir.as_deref().unwrap_or(&extract_dir);
+    print_system_version(game_dir, &hash_entries);
     check_license_rif(&hash_entries);
     check_app_folder(&hash_entries);
 
@@ -341,7 +355,32 @@ fn process_exfat(
     Ok(ctx.files.len())
 }
 
-fn read_bytes_at(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
+fn parse_psf_key(data: &[u8], key: &str) -> Option<Vec<u8>> {
+    if data.len() < 20 || &data[0..4] != b"\0PSF" {
+        return None;
+    }
+    let key_table = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+    let data_table = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
+    let entry_count = u32::from_le_bytes(data[16..20].try_into().ok()?) as usize;
+    for i in 0..entry_count {
+        let e = 20 + i * 16;
+        if e + 16 > data.len() {
+            break;
+        }
+        let key_offset = u16::from_le_bytes(data[e..e+2].try_into().ok()?) as usize;
+        let data_len = u32::from_le_bytes(data[e+4..e+8].try_into().ok()?) as usize;
+        let data_offset = u32::from_le_bytes(data[e+12..e+16].try_into().ok()?) as usize;
+        let key_start = key_table + key_offset;
+        let key_end = data[key_start..].iter().position(|&b| b == 0).map(|p| key_start + p)?;
+        if &data[key_start..key_end] == key.as_bytes() {
+            let val_start = data_table + data_offset;
+            return Some(data[val_start..val_start + data_len].to_vec());
+        }
+    }
+    None
+}
+
+fn read_bytes(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
     let mut f = File::open(path).ok()?;
     f.seek(SeekFrom::Start(offset)).ok()?;
     let mut buf = vec![0u8; len];
@@ -349,8 +388,8 @@ fn read_bytes_at(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn read_version_at(path: &Path, offset: u64) -> Option<[u8; 4]> {
-    let bytes = read_bytes_at(path, offset, 4)?;
+fn read_version(path: &Path, offset: u64) -> Option<[u8; 4]> {
+    let bytes = read_bytes(path, offset, 4)?;
     Some([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
@@ -358,10 +397,23 @@ fn format_version(b: [u8; 4]) -> String {
     format!("{}.{:02X}", b[3], b[2])
 }
 
-fn print_system_version(extract_dir: &Path, hash_entries: &[HashEntry]) {
-    let sfo_path = extract_dir.join("gc/param.sfo");
+fn read_psf(sfo_path: &Path) -> Option<Vec<u8>> {
+    let mut f = File::open(sfo_path).ok()?;
+    let file_len = f.seek(SeekFrom::End(0)).ok()?;
+    if file_len < 0x604 { return None; }
+    let available = ((file_len - 0x600) as usize).min(0x1000);
+    f.seek(SeekFrom::Start(0x600)).ok()?;
+    let mut buf = vec![0u8; available];
+    f.read_exact(&mut buf).ok()?;
+    if &buf[0..4] != b"\0PSF" { return None; }
+    Some(buf)
+}
 
-    if let Some(title_id_bytes) = read_bytes_at(&sfo_path, 0x410, 9) {
+fn print_system_version(game_dir: &Path, hash_entries: &[HashEntry]) {
+    let sfo_path = game_dir.join("gc/param.sfo");
+    let psf = read_psf(&sfo_path);
+
+    if let Some(title_id_bytes) = read_bytes(&sfo_path, 0x410, 9) {
         let title_id = String::from_utf8_lossy(&title_id_bytes).trim_end_matches('\0').to_string();
 
         let app_dir = hash_entries.iter().find_map(|e| {
@@ -384,10 +436,73 @@ fn print_system_version(extract_dir: &Path, hash_entries: &[HashEntry]) {
             }
         }
 
+        if let Some(ref p) = psf {
+            if let Some(val) = parse_psf_key(p, "TITLE_ID") {
+                let psf_title_id = String::from_utf8_lossy(&val).trim_end_matches('\0').to_string();
+                if !psf_title_id.eq_ignore_ascii_case(&title_id) {
+                    println!("WARNING: Title ID mismatch between SFO header (0x410: {}) and PSF at 0x600 ({})", title_id, psf_title_id);
+                }
+            } else {
+                println!("WARNING: TITLE_ID not found in PSF at 0x600");
+            }
+            if let Some(val) = parse_psf_key(p, "CATEGORY") {
+                let category = String::from_utf8_lossy(&val).trim_end_matches('\0').to_string();
+                if !category.eq_ignore_ascii_case("gc") {
+                    println!("CATEGORY: {}", category);
+                }
+            } else {
+                println!("WARNING: CATEGORY not found in PSF at 0x600");
+            }
+        }
+
         println!("Title ID: {}", title_id);
+        if let Some(ref p) = psf {
+            if let Some(val) = parse_psf_key(p, "VERSION") {
+                println!("Game Version: {}", String::from_utf8_lossy(&val).trim_end_matches('\0'));
+            } else {
+                println!("WARNING: VERSION not found in PSF at 0x600");
+            }
+        }
     }
-    let sfo_ver = read_version_at(&extract_dir.join("gc/param.sfo"), 0x40C);
-    let pup_ver = read_version_at(&extract_dir.join("psp2/update/psp2updat.pup"), 0x10);
+    let sfo_ver = read_version(&sfo_path, 0x40C);
+    let psf_ver: Option<[u8; 4]> = psf.as_ref().and_then(|p| {
+        let val = parse_psf_key(p, "PSP2_SYSTEM_VER")?;
+        if val.len() >= 4 { Some([val[0], val[1], val[2], val[3]]) } else { None }
+    });
+    if psf.is_some() && psf_ver.is_none() {
+        println!("WARNING: PSP2_SYSTEM_VER not found in PSF at 0x600");
+    }
+    let psf_root_ver: Option<[u8; 4]> = psf.as_ref().and_then(|p| {
+        let val = parse_psf_key(p, "PSP2_SYSTEM_ROOT_VER")?;
+        if val.len() >= 4 { Some([val[0], val[1], val[2], val[3]]) } else { None }
+    });
+    if psf.is_some() && psf_root_ver.is_none() {
+        println!("WARNING: PSP2_SYSTEM_ROOT_VER not found in PSF at 0x600");
+    }
+    let psf_disp_ver: Option<String> = psf.as_ref().and_then(|p| {
+        let val = parse_psf_key(p, "PSP2_DISP_VER")?;
+        Some(String::from_utf8_lossy(&val).trim_end_matches('\0').to_string())
+    });
+    if psf.is_some() && psf_disp_ver.is_none() {
+        println!("WARNING: PSP2_DISP_VER not found in PSF at 0x600");
+    }
+    if let (Some(s), Some(p)) = (sfo_ver, psf_ver) {
+        if s != p {
+            println!("WARNING: System Update version mismatch between SFO header (0x40C: {}) and PSF PSP2_SYSTEM_VER ({})", format_version(s), format_version(p));
+        }
+    }
+    if let (Some(s), Some(p)) = (sfo_ver, psf_root_ver) {
+        if s != p {
+            println!("WARNING: System Update version mismatch between SFO header (0x40C: {}) and PSF PSP2_SYSTEM_ROOT_VER ({})", format_version(s), format_version(p));
+        }
+    }
+    if let (Some(s), Some(ref d)) = (sfo_ver, psf_disp_ver) {
+        let expected = format!("{:02}.{:02X}0", s[3], s[2]);
+        if d.trim_end_matches('\0') != expected {
+            println!("WARNING: System Update version mismatch between SFO header (0x40C: {}) and PSF PSP2_DISP_VER ({})", format_version(s), d);
+        }
+    }
+    let pup_ver = read_version(&game_dir.join("psp2/update/psp2updat.pup"), 0x10);
     match (sfo_ver, pup_ver) {
         (Some(s), Some(p)) if s == p => println!("System Update version: {}", format_version(s)),
         (Some(s), Some(p)) => {
