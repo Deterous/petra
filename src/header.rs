@@ -4,6 +4,85 @@ use std::io::Read;
 pub const HEADER_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PartitionCode {
+    Empty,
+    Idstor,
+    SLoader,
+    Os0,
+    Vs0,
+    Vd0,
+    Tm0,
+    Ur0,
+    Ux0,
+    Gro0,
+    Grw0,
+    Ud0,
+    Sa0,
+    MediaID,
+    Pd0,
+    Unknown(u8),
+}
+
+impl PartitionCode {
+    fn from_byte(b: u8) -> Self {
+        match b {
+            0x0 => PartitionCode::Empty,
+            0x1 => PartitionCode::Idstor,
+            0x2 => PartitionCode::SLoader,
+            0x3 => PartitionCode::Os0,
+            0x4 => PartitionCode::Vs0,
+            0x5 => PartitionCode::Vd0,
+            0x6 => PartitionCode::Tm0,
+            0x7 => PartitionCode::Ur0,
+            0x8 => PartitionCode::Ux0,
+            0x9 => PartitionCode::Gro0,
+            0xA => PartitionCode::Grw0,
+            0xB => PartitionCode::Ud0,
+            0xC => PartitionCode::Sa0,
+            0xD => PartitionCode::MediaID,
+            0xE => PartitionCode::Pd0,
+            other => PartitionCode::Unknown(other),
+        }
+    }
+
+    pub fn name(&self) -> Option<&'static str> {
+        match self {
+            PartitionCode::Empty => Some("empty"),
+            PartitionCode::Idstor => Some("idstor"),
+            PartitionCode::SLoader => Some("sloader"),
+            PartitionCode::Os0 => Some("os"),
+            PartitionCode::Vs0 => Some("vsh"),
+            PartitionCode::Vd0 => Some("vshdata"),
+            PartitionCode::Tm0 => Some("vtrm"),
+            PartitionCode::Ur0 => Some("user"),
+            PartitionCode::Ux0 => Some("userext"),
+            PartitionCode::Gro0 => Some("gamero"),
+            PartitionCode::Grw0 => Some("gamerw"),
+            PartitionCode::Ud0 => Some("updater"),
+            PartitionCode::Sa0 => Some("sysdata"),
+            PartitionCode::MediaID => Some("mediaid"),
+            PartitionCode::Pd0 => Some("pidata"),
+            PartitionCode::Unknown(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for PartitionCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.name() {
+            Some(name) => write!(f, "{}", name),
+            None => {
+                if let PartitionCode::Unknown(b) = self {
+                    write!(f, "Unknown (0x{:02X})", b)
+                } else {
+                    unreachable!()
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileSystem {
     Fat16,
     ExFat,
@@ -37,7 +116,7 @@ impl fmt::Display for FileSystem {
 pub struct Partition {
     pub offset: u32,
     pub size: u32,
-    pub code: u8,
+    pub code: PartitionCode,
     pub filesystem: FileSystem,
     pub active: u8,
     pub flags: u32,
@@ -58,7 +137,9 @@ impl ImgHeader {
     }
 
     pub fn print(&self, actual_file_size: u64) {
-        println!("Version: {}", self.version());
+        if self.version() != 3 {
+            println!("WARNING: Unexpected header version: {}", self.version());
+        }
 
         let device_size_bytes = self.image_size() as u64 * 512;
         if device_size_bytes != actual_file_size {
@@ -94,7 +175,7 @@ impl ImgHeader {
         }
 
         for (i, entry) in self.partitions.iter().enumerate() {
-            println!("Partition {}: code=0x{:02X}, type={}, active=0x{:02X}, flags=0x{:08X}", i, entry.code, entry.filesystem, entry.active, entry.flags);
+            println!("Partition {}: code={}, type={}, active=0x{:02X}, flags=0x{:08X}", i, entry.code, entry.filesystem, entry.active, entry.flags);
         }
     }
 }
@@ -122,7 +203,7 @@ fn parse_partitions(header_raw: &[u8; HEADER_SIZE], file_size: u64) -> Result<Ve
 
         let size = u32::from_le_bytes([entry_bytes[0x4], entry_bytes[0x5], entry_bytes[0x6], entry_bytes[0x7]]);
 
-        let code = entry_bytes[0x8];
+        let code = PartitionCode::from_byte(entry_bytes[0x8]);
         let filesystem = FileSystem::from_byte(entry_bytes[0x9]);
         let active = entry_bytes[0xA];
 

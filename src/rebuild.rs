@@ -47,10 +47,7 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
 
         for (idx, entry) in hash_entries.iter().enumerate() {
             let parts: Vec<&str> = entry.path.trim_start_matches('/').split('/').collect();
-            let is_license_rif = parts.len() == 4
-                && parts[0].eq_ignore_ascii_case("license")
-                && parts[1].eq_ignore_ascii_case("app")
-                && parts[3].ends_with(".rif");
+            let is_license_rif = parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") && parts[3].ends_with(".rif");
             if entry.size == lic_size && is_license_rif {
                 println!("Using license override for: {}", entry.path);
                 matches.insert(idx, lic_path.to_path_buf());

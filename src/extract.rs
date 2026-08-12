@@ -55,6 +55,14 @@ pub fn run(path: &Path) -> Result<(), String> {
 
     let mut pos: u64 = BLOCK_SIZE;
 
+    let exfat_count = partitions.iter().filter(|p| p.filesystem == FileSystem::ExFat).count();
+    let mut exfat_index: usize = 0;
+    let mut code_totals: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in partitions.iter().filter(|p| p.filesystem == FileSystem::ExFat) {
+        *code_totals.entry(p.code.name().unwrap_or("partition").to_string()).or_insert(0) += 1;
+    }
+    let mut code_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
     for partition in &partitions {
         let partition_start = partition.offset as u64 * BLOCK_SIZE;
         let partition_size = partition.size as u64 * BLOCK_SIZE;
@@ -67,7 +75,21 @@ pub fn run(path: &Path) -> Result<(), String> {
 
         match partition.filesystem {
             FileSystem::ExFat => {
-                process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &extract_dir, data_offset)?;
+                let partition_extract_dir = if exfat_count > 1 {
+                    let base_name = match partition.code.name() {
+                        Some(name) => name.to_string(),
+                        None => format!("partition{}", exfat_index),
+                    };
+                    let total = *code_totals.get(&base_name).unwrap_or(&1);
+                    let count = code_counts.entry(base_name.clone()).or_insert(0);
+                    let folder_name = if total > 1 { format!("{}{}", base_name, count) } else { base_name.clone() };
+                    *count += 1;
+                    extract_dir.join(&folder_name)
+                } else {
+                    extract_dir.clone()
+                };
+                exfat_index += 1;
+                process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &partition_extract_dir, data_offset)?;
             }
             _ => {
                 process_raw(&mut reader, &mut skeleton_writer, partition)?;
@@ -108,6 +130,10 @@ pub fn run(path: &Path) -> Result<(), String> {
 
     println!("Created: {}", hash_path.display());
     println!("Created: {}", skeleton_path.display());
+
+    print_system_version(&extract_dir, &hash_entries);
+    check_license_rif(&hash_entries);
+    check_app_folder(&hash_entries);
 
     Ok(())
 }
@@ -175,12 +201,21 @@ fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, 
 fn process_raw(reader: &mut impl Read, writer: &mut SkeletonWriter, partition: &Partition) -> Result<(), String> {
     let partition_start = partition.offset as u64 * BLOCK_SIZE;
     let partition_size = partition.size as u64 * BLOCK_SIZE;
-    let all_zeros = copy_region(reader, writer, partition_start, partition_size)?;
-    if all_zeros {
-        println!("{} partition at 0x{:X} ({} blocks): entirely zeroed", partition.filesystem, partition_start, partition.size);
-    } else {
-        println!("{} partition at 0x{:X} ({} blocks): contains data", partition.filesystem, partition_start, partition.size);
+    let mut buf = vec![0u8; CHUNK_SIZE];
+    let mut remaining = partition_size;
+    let mut all_zeros = true;
+    while remaining > 0 {
+        let to_read = remaining.min(CHUNK_SIZE as u64) as usize;
+        reader.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read {} partition at 0x{:X}: {}", partition.filesystem, partition_start, e))?;
+        if all_zeros && buf[..to_read].iter().any(|&b| b != 0) {
+            all_zeros = false;
+        }
+        remaining -= to_read as u64;
     }
+    if !all_zeros {
+        println!("{} partition at 0x{:X} ({} blocks): contains data, zeroed in skeleton", partition.filesystem, partition_start, partition.size);
+    }
+    writer.write_zeros(partition_size).map_err(|e| format!("ERROR: Failed to write zeros for {} partition: {}", partition.filesystem, e))?;
     Ok(())
 }
 
@@ -305,6 +340,141 @@ fn process_exfat(reader: &mut (impl Read + Seek), writer: &mut SkeletonWriter, p
     println!("exFAT partition at 0x{:X}: {} files extracted", partition_start, ctx.files.len());
 
     Ok(())
+}
+
+fn read_bytes_at(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
+    let mut f = File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+fn read_version_at(path: &Path, offset: u64) -> Option<[u8; 4]> {
+    let bytes = read_bytes_at(path, offset, 4)?;
+    Some([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn format_version(b: [u8; 4]) -> String {
+    format!("{}.{:02X}", b[3], b[2])
+}
+
+fn print_system_version(extract_dir: &Path, hash_entries: &[HashEntry]) {
+    let sfo_path = extract_dir.join("gc/param.sfo");
+
+    if let Some(title_id_bytes) = read_bytes_at(&sfo_path, 0x410, 9) {
+        let title_id = String::from_utf8_lossy(&title_id_bytes).trim_end_matches('\0').to_string();
+
+        let app_dir = hash_entries.iter().find_map(|e| {
+            let parts: Vec<&str> = e.path.trim_start_matches('/').splitn(3, '/').collect();
+            if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("app") { Some(parts[1].to_string()) } else { None }
+        });
+        let license_dir = hash_entries.iter().find_map(|e| {
+            let parts: Vec<&str> = e.path.trim_start_matches('/').split('/').collect();
+            if parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") { Some(parts[2].to_string()) } else { None }
+        });
+
+        if let Some(ref app) = app_dir {
+            if !app.eq_ignore_ascii_case(&title_id) {
+                println!("WARNING: Title ID mismatch: SFO says {}, /app/ folder is {}", title_id, app);
+            }
+        }
+        if let Some(ref lic) = license_dir {
+            if !lic.eq_ignore_ascii_case(&title_id) {
+                println!("WARNING: Title ID mismatch: SFO says {}, /license/app/ folder is {}", title_id, lic);
+            }
+        }
+
+        println!("Title ID: {}", title_id);
+    }
+    let sfo_ver = read_version_at(&extract_dir.join("gc/param.sfo"), 0x40C);
+    let pup_ver = read_version_at(&extract_dir.join("psp2/update/psp2updat.pup"), 0x10);
+    match (sfo_ver, pup_ver) {
+        (Some(s), Some(p)) if s == p => println!("System Update version: {}", format_version(s)),
+        (Some(s), Some(p)) => {
+            println!("WARNING: System Update version mismatch between SFO and PUP");
+            println!("System Update version (SFO): {}", format_version(s));
+            println!("System Update version (PUP): {}", format_version(p));
+        }
+        (Some(s), None) => {
+            println!("WARNING: psp2updat.pup missing, cannot verify System Update version");
+            println!("System Update version (SFO): {}", format_version(s));
+        }
+        (None, Some(p)) => {
+            println!("WARNING: param.sfo missing, cannot verify System Update version");
+            println!("System Update version (PUP): {}", format_version(p));
+        }
+        (None, None) => println!("WARNING: param.sfo and psp2updat.pup missing, cannot determine System Update version"),
+    }
+}
+
+fn check_app_folder(hash_entries: &[HashEntry]) {
+    let app_dirs: std::collections::HashSet<&str> = hash_entries
+        .iter()
+        .filter_map(|e| {
+            let parts: Vec<&str> = e.path.trim_start_matches('/').splitn(3, '/').collect();
+            if parts.len() >= 2 && parts[0].eq_ignore_ascii_case("app") { Some(parts[1]) } else { None }
+        })
+        .collect();
+
+    if app_dirs.is_empty() {
+        println!("WARNING: No /app/ folder found");
+        return;
+    }
+
+    if app_dirs.len() > 1 {
+        println!("WARNING: Multiple subfolders found in /app/: {:?}", app_dirs);
+    } else {
+        let dir = app_dirs.iter().next().unwrap();
+        if dir.len() != 9 {
+            println!("WARNING: /app/{} subfolder name is not 9 characters (got {})", dir, dir.len());
+        }
+        let has_eboot = hash_entries.iter().any(|e| e.path.eq_ignore_ascii_case(&format!("/app/{}/eboot.bin", dir)));
+        if !has_eboot {
+            println!("WARNING: No eboot.bin found in /app/{}/", dir);
+        }
+    }
+}
+
+fn check_license_rif(hash_entries: &[HashEntry]) {
+    let app_files: Vec<&str> = hash_entries
+        .iter()
+        .filter(|e| {
+            let parts: Vec<&str> = e.path.trim_start_matches('/').split('/').collect();
+            parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app")
+        })
+        .map(|e| e.path.as_str())
+        .collect();
+
+    let rif_count = app_files.iter().filter(|p| p.ends_with(".rif")).count();
+    if rif_count == 0 {
+        println!("WARNING: No .rif file found in /license/app/");
+        return;
+    }
+
+    for entry in hash_entries.iter().filter(|e| {
+        let parts: Vec<&str> = e.path.trim_start_matches('/').split('/').collect();
+        parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") && parts[3].ends_with(".rif")
+    }) {
+        if entry.size != 0x200 {
+            println!("WARNING: {} is {} bytes, expected 0x200", entry.path, entry.size);
+        }
+        let filename = entry.path.trim_start_matches('/').split('/').nth(3).unwrap_or("");
+        let stem_len = filename.len().saturating_sub(4); // strip ".rif"
+        if stem_len != 32 {
+            println!("WARNING: {} filename is {} characters, expected 32", entry.path, stem_len);
+        }
+    }
+
+    let app_dirs: std::collections::HashSet<&str> = app_files.iter().map(|p| p.trim_start_matches('/').splitn(4, '/').nth(2).unwrap_or("")).collect();
+
+    if app_dirs.len() > 1 {
+        println!("WARNING: Multiple folders found in /license/app/: {:?}", app_dirs);
+    }
+
+    if app_files.len() > 1 {
+        println!("WARNING: Multiple files found in /license/app/: {} files", app_files.len());
+    }
 }
 
 fn wipe_license_data(buf: &mut [u8], file_offset: u64, chunk_len: usize) -> bool {
