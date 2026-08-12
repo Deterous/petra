@@ -472,7 +472,7 @@ fn validate_game(game_dir: &Path, hash_entries: &[HashEntry]) {
             println!("WARNING: CATEGORY not found in PSF at 0x600");
         }
         if let Some(val) = p.get("VERSION") {
-            println!("Game Version: {}", psf_str(val));
+            println!("Game version: {}", psf_str(val));
         } else {
             println!("WARNING: VERSION not found in PSF at 0x600");
         }
@@ -507,7 +507,7 @@ fn validate_game(game_dir: &Path, hash_entries: &[HashEntry]) {
         }
     }
     if let (Some(s), Some(p)) = (sfo_ver, psf_root_ver) {
-        if s != p {
+        if s != p && p != [0u8; 4] {
             println!("WARNING: System Update version mismatch between SFO header (0x40C: {}) and PSP2_SYSTEM_ROOT_VER ({})", format_version(s), format_version(p));
         }
     }

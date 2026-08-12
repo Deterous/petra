@@ -187,7 +187,16 @@ impl ImgHeader {
                 0xFFF => "read-write (0xFFF)".to_string(),
                 x => format!("0x{:03X}", x),
             };
-            println!("Partition {}: type={}, fs={}, active={}, flags={}", i, entry.code, entry.filesystem, active_str, flags_str);
+            println!(
+                "Partition {}: offset=0x{:X}, length=0x{:X}, type={}, fs={}, active={}, flags={}",
+                i,
+                entry.offset as u64 * 512,
+                entry.size as u64 * 512,
+                entry.code,
+                entry.filesystem,
+                active_str,
+                flags_str
+            );
         }
     }
 }
@@ -289,7 +298,7 @@ pub fn parse(reader: &mut impl Read, file_size: u64) -> Result<ImgHeader, String
     reader.read_exact(&mut raw).map_err(|e| format!("ERROR: Failed to read image header: {}", e))?;
 
     if &raw[0x00..0x20] != MAGIC.as_slice() {
-        return Err("ERROR: Invalid cart dump file".to_string());
+        return Err("ERROR: Invalid psvita image file".to_string());
     }
 
     let partitions = parse_partitions(&raw, file_size)?;
