@@ -142,8 +142,10 @@ impl ImgHeader {
         }
 
         let device_size_bytes = self.image_size() as u64 * 512;
-        if device_size_bytes != actual_file_size {
-            println!("WARNING: Device size mismatch: header says {} bytes ({} blocks), actual file is {} bytes", device_size_bytes, self.image_size(), actual_file_size);
+        if actual_file_size > device_size_bytes {
+            println!("Trimmed skeleton to device size: {} bytes ({} blocks)", device_size_bytes, self.image_size());
+        } else if actual_file_size < device_size_bytes {
+            println!("WARNING: File is smaller than device size: header says {} bytes ({} blocks), actual file is {} bytes", device_size_bytes, self.image_size(), actual_file_size);
         }
 
         if !is_region_zero(&self.raw, 0x28, 0x4F) {
@@ -175,7 +177,17 @@ impl ImgHeader {
         }
 
         for (i, entry) in self.partitions.iter().enumerate() {
-            println!("Partition {}: code={}, type={}, active=0x{:02X}, flags=0x{:08X}", i, entry.code, entry.filesystem, entry.active, entry.flags);
+            let active_str = match entry.active {
+                0x00 => "no".to_string(),
+                0x01 => "yes".to_string(),
+                x => format!("0x{:02X}", x),
+            };
+            let flags_str = match entry.flags {
+                0x555 => "read-only (0x555)".to_string(),
+                0xFFF => "read-write (0xFFF)".to_string(),
+                x => format!("0x{:03X}", x),
+            };
+            println!("Partition {}: type={}, fs={}, active={}, flags={}", i, entry.code, entry.filesystem, active_str, flags_str);
         }
     }
 }
