@@ -21,7 +21,7 @@ You can also force rebuilding the img with a different license .rif file even if
 usage: `petra.exe example/ license.rif`
 
 ## Validation
-Validate a folder of files given an existing list of file hashes (`example.tsv`). This also work with PSN dumps (including NoNpDrm dumps), just point to the folder of files.
+Validate a folder of files given an existing list of file hashes. Ensure the filename matches the folder name, e.g. `example.tsv` and `example/`. This also work with PSN dumps (including NoNpDrm dumps), just point to the folder of files (no need to rename the files).
 
 usage: `petra.exe example/`
 

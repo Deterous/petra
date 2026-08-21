@@ -24,10 +24,6 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
     let hash_path = parent.join(format!("{}.tsv", name));
     let output_path = parent.join(format!("{}.img", name));
 
-    if output_path.exists() {
-        return Err(format!("ERROR: Output file already exists: {}", output_path.display()));
-    }
-
     if !hash_path.exists() {
         return Err(format!("ERROR: Hash file not found: {}", hash_path.display()));
     }
@@ -55,6 +51,11 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
         }
     }
 
+    if output_path.exists() {
+        println!("All matching files found");
+        return Ok(());
+    }
+
     if matches.len() != hash_entries.len() {
         let mut unmatched = Vec::new();
         for (idx, entry) in hash_entries.iter().enumerate() {
@@ -74,7 +75,8 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
     } else if skeleton_zst_path.exists() {
         false
     } else {
-        return Err(format!("ERROR: Skeleton file not found: {}", skeleton_zst_path.display()));
+        println!("All matching files found, to rebuild the image provide: {}", skeleton_zst_path.file_name().unwrap().to_string_lossy());
+        return Ok(());
     };
 
     let file_size = if use_raw_skeleton { skeleton::read_image_size_raw(&skeleton_raw_path)? } else { skeleton::read_image_size(&skeleton_zst_path)? };
