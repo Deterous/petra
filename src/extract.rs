@@ -4,7 +4,7 @@ use std::path::Path;
 
 const HEADER_SKIP: u64 = 512;
 
-use sha1::{Digest, Sha1};
+use sha2::{Digest, Sha256};
 
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
@@ -42,7 +42,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     let name = path.file_stem().ok_or("ERROR: Can't get file name")?.to_string_lossy();
 
     let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
-    let hash_path = parent.join(format!("{}.files.tsv", name));
+    let hash_path = parent.join(format!("{}.tsv", name));
     let extract_dir = parent.join(name.as_ref());
 
     if skeleton_path.exists() {
@@ -65,6 +65,7 @@ pub fn run(path: &Path) -> Result<(), String> {
     partitions.sort_by_key(|p| p.offset);
     let sorted_partitions: Vec<Partition> = partitions.iter().map(|p| (*p).clone()).collect();
     let part_names = header::partition_names(&sorted_partitions, |fs| matches!(fs, FileSystem::ExFat));
+    let multi_partition = part_names.iter().filter(|n| n.is_some()).count() > 1;
 
     let mut pos: u64 = BLOCK_SIZE;
 
@@ -81,8 +82,8 @@ pub fn run(path: &Path) -> Result<(), String> {
         match partition.filesystem {
             FileSystem::ExFat => {
                 let partition_dir = match part_name {
-                    Some(name) => extract_dir.join(name),
-                    None => extract_dir.clone(),
+                    Some(name) if multi_partition => extract_dir.join(name),
+                    _ => extract_dir.clone(),
                 };
                 let num_files = process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &partition_dir, data_offset)?;
                 let display_name = partition.code.name().unwrap_or("unknown");
@@ -129,7 +130,10 @@ pub fn run(path: &Path) -> Result<(), String> {
     println!("File hashes saved to: {}", hash_path.display());
     println!("Image skeleton saved to: {}", skeleton_path.display());
 
-    let gamero_dir = part_names.iter().zip(sorted_partitions.iter()).find_map(|(name, p)| if matches!(p.code, PartitionCode::Gro0) { name.as_ref().map(|n| extract_dir.join(n)) } else { None });
+    let gamero_dir = part_names
+        .iter()
+        .zip(sorted_partitions.iter())
+        .find_map(|(name, p)| if matches!(p.code, PartitionCode::Gro0) { name.as_ref().filter(|_| multi_partition).map(|n| extract_dir.join(n)) } else { None });
     let game_dir = gamero_dir.as_deref().unwrap_or(&extract_dir);
     validate_game(game_dir, &hash_entries);
 
@@ -239,7 +243,7 @@ fn process_exfat(
     let cluster_to_file = exfat::build_cluster_map(&ctx.files);
 
     let num_files = ctx.files.len();
-    let mut hashers: Vec<Sha1> = (0..num_files).map(|_| Sha1::new()).collect();
+    let mut hashers: Vec<Sha256> = (0..num_files).map(|_| Sha256::new()).collect();
     let mut remaining_bytes: Vec<u64> = ctx.files.iter().map(|f| f.size).collect();
     let mut file_writers: Vec<Option<BufWriter<File>>> = Vec::with_capacity(num_files);
 
@@ -332,10 +336,10 @@ fn process_exfat(
             w.into_inner().map_err(|e| format!("ERROR: Failed to flush file: {}", e))?;
         }
 
-        let hasher = std::mem::replace(&mut hashers[file_idx], Sha1::new());
+        let hasher = std::mem::replace(&mut hashers[file_idx], Sha256::new());
         let hash_result = hasher.finalize();
-        let sha1 = {
-            let mut hex = String::with_capacity(40);
+        let sha256 = {
+            let mut hex = String::with_capacity(64);
             for byte in hash_result.iter() {
                 use std::fmt::Write as FmtWrite;
                 write!(hex, "{:02x}", byte).unwrap();
@@ -346,7 +350,7 @@ fn process_exfat(
         let partition_offset = if let Some(&first_cluster) = file_info.chain.first() { cluster_heap_start + (first_cluster as u64 - 2) * cluster_size as u64 } else { 0 };
 
         let offset = (partition_start + partition_offset) / BLOCK_SIZE;
-        hash_entries.push(HashEntry { sha1, offset, size: file_info.size, path: file_info.path.clone() });
+        hash_entries.push(HashEntry { sha256, offset, size: file_info.size, path: file_info.path.clone() });
     }
 
     Ok(ctx.files.len())

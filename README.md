@@ -12,7 +12,7 @@ usage: `petra.exe example.img`
 **Note**: The skeleton's image header and extracted RIF file have their unique data zeroed to be deterministic.
 
 ## Rebuilding
-Rebuilds a raw img file given a folder of files, a skeleton (`example.skeleton.zst`), and a list of file hashes (`example.files.tsv`).
+Rebuilds a raw img file given a folder of files, a skeleton (`example.skeleton.zst`), and a list of file hashes (`example.tsv`).
 
 usage: `petra.exe example/`
 
@@ -21,7 +21,7 @@ You can also force rebuilding the img with a different license .rif file even if
 usage: `petra.exe example/ license.rif`
 
 ## Validation
-Validate a folder of files given an existing list of file hashes (`example.files.tsv`). This also work with PSN dumps (including NoNpDrm dumps), just point to the folder of files.
+Validate a folder of files given an existing list of file hashes (`example.tsv`). This also work with PSN dumps (including NoNpDrm dumps), just point to the folder of files.
 
 usage: `petra.exe example/`
 

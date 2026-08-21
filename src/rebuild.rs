@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use sha1::{Digest, Sha1};
+use sha2::{Digest, Sha256};
 
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
@@ -21,7 +21,7 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
 
     let skeleton_zst_path = parent.join(format!("{}.skeleton.zst", name));
     let skeleton_raw_path = parent.join(format!("{}.skeleton", name));
-    let hash_path = parent.join(format!("{}.files.tsv", name));
+    let hash_path = parent.join(format!("{}.tsv", name));
     let output_path = parent.join(format!("{}.img", name));
 
     if output_path.exists() {
@@ -64,7 +64,7 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
         }
         let mut msg = format!("ERROR: Missing {} file(s) for rebuild:\n", unmatched.len());
         for entry in &unmatched {
-            msg.push_str(&format!("  sha1={} size={} ({})\n", entry.sha1, entry.size, entry.path));
+            msg.push_str(&format!("  sha256={} size={} ({})\n", entry.sha256, entry.size, entry.path));
         }
         return Err(msg.trim_end().to_string());
     }
@@ -170,7 +170,7 @@ fn scan_recursive(dir: &Path, files: &mut Vec<ScannedFile>) -> Result<(), String
 fn match_files(scanned: &[ScannedFile], entries: &[HashEntry], expected_sizes: &HashSet<u64>) -> Result<HashMap<usize, PathBuf>, String> {
     let mut lookup: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
     for (idx, entry) in entries.iter().enumerate() {
-        lookup.entry((&entry.sha1, entry.size)).or_default().push(idx);
+        lookup.entry((&entry.sha256, entry.size)).or_default().push(idx);
     }
 
     let mut matches: HashMap<usize, PathBuf> = HashMap::new();
@@ -180,9 +180,9 @@ fn match_files(scanned: &[ScannedFile], entries: &[HashEntry], expected_sizes: &
             continue;
         }
 
-        let sha1 = hash_file(&file.path)?;
+        let sha256 = hash_file(&file.path)?;
 
-        if let Some(entry_indices) = lookup.get(&(sha1.as_str(), file.size)) {
+        if let Some(entry_indices) = lookup.get(&(sha256.as_str(), file.size)) {
             for &entry_idx in entry_indices {
                 matches.insert(entry_idx, file.path.clone());
             }
@@ -194,7 +194,7 @@ fn match_files(scanned: &[ScannedFile], entries: &[HashEntry], expected_sizes: &
 
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("ERROR: Failed to open {}: {}", path.display(), e))?;
-    let mut hasher = Sha1::new();
+    let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buf).map_err(|e| format!("ERROR: Failed to read {}: {}", path.display(), e))?;
@@ -204,7 +204,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
         hasher.update(&buf[..n]);
     }
     let hash = hasher.finalize();
-    let mut hex = String::with_capacity(40);
+    let mut hex = String::with_capacity(64);
     for byte in hash.iter() {
         use std::fmt::Write;
         write!(hex, "{:02x}", byte).unwrap();

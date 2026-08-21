@@ -4,20 +4,20 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub struct HashEntry {
-    pub sha1: String,
+    pub sha256: String,
     pub offset: u64,
     pub size: u64,
     pub path: String,
 }
 
-pub const HASH_FILE_HEADER: &str = "sha1\toffset(sectors)\tsize(bytes)\tpath";
+pub const HASH_FILE_HEADER: &str = "sha256\toffset(sectors)\tsize(bytes)\tpath";
 
 pub fn write_hash_file(path: &Path, entries: &[HashEntry]) -> std::io::Result<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     writeln!(writer, "{}", HASH_FILE_HEADER)?;
     for entry in entries {
-        writeln!(writer, "{}\t{}\t{}\t{}", entry.sha1, entry.offset, entry.size, entry.path)?;
+        writeln!(writer, "{}\t{}\t{}\t{}", entry.sha256, entry.offset, entry.size, entry.path)?;
     }
     writer.flush()?;
     Ok(())
@@ -32,7 +32,7 @@ pub fn read_hash_file(path: &Path) -> Result<Vec<HashEntry>, String> {
             continue;
         }
 
-        if line_num == 0 && line.starts_with("sha1\t") {
+        if line_num == 0 && line.starts_with("sha256\t") {
             continue;
         }
 
@@ -44,7 +44,7 @@ pub fn read_hash_file(path: &Path) -> Result<Vec<HashEntry>, String> {
         let size: u64 = parts[2].parse().map_err(|_| format!("ERROR: Invalid size at line {}: \"{}\"", line_num + 1, line))?;
         let entry_path = if parts.len() == 4 { parts[3].to_string() } else { String::new() };
 
-        entries.push(HashEntry { sha1: parts[0].to_string(), offset, size, path: entry_path });
+        entries.push(HashEntry { sha256: parts[0].to_string(), offset, size, path: entry_path });
     }
 
     Ok(entries)
