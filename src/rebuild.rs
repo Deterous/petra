@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use crate::common;
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
 use crate::header::{self, FileSystem};
@@ -15,7 +16,42 @@ struct ScannedFile {
     size: u64,
 }
 
-pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> {
+pub fn verify(input_dir: &Path) -> Result<(), String> {
+    if !input_dir.is_dir() {
+        return Err(format!("ERROR: Not a directory: {}", input_dir.display()));
+    }
+
+    let parent = input_dir.parent().unwrap_or(Path::new("."));
+    let name = input_dir.file_name().ok_or("Cannot determine folder name")?.to_string_lossy();
+    let hash_path = parent.join(format!("{}.tsv", name));
+
+    if !hash_path.exists() {
+        return Err(format!("ERROR: Hash file not found: {}", hash_path.display()));
+    }
+
+    let hash_entries = hash::read_hash_file(&hash_path)?;
+    let matches = resolve_files(input_dir, &hash_entries)?;
+
+    let unmatched: Vec<&HashEntry> = hash_entries.iter().enumerate().filter_map(|(idx, e)| if matches.contains_key(&idx) { None } else { Some(e) }).collect();
+
+    if unmatched.is_empty() {
+        println!("All {} files found and verified", hash_entries.len());
+    } else {
+        let mut msg = format!("ERROR: {} file(s) missing or mismatched:\n", unmatched.len());
+        for entry in &unmatched {
+            msg.push_str(&format!("  sha256={} size={} ({})\n", entry.sha256, entry.size, entry.path));
+        }
+        return Err(msg.trim_end().to_string());
+    }
+
+    Ok(())
+}
+
+pub fn run(input_dir: &Path) -> Result<(), String> {
+    if !input_dir.is_dir() {
+        return Err(format!("ERROR: Not a directory: {}", input_dir.display()));
+    }
+
     let parent = input_dir.parent().unwrap_or(Path::new("."));
     let name = input_dir.file_name().ok_or("Cannot determine folder name")?.to_string_lossy();
 
@@ -24,37 +60,16 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
     let hash_path = parent.join(format!("{}.tsv", name));
     let output_path = parent.join(format!("{}.img", name));
 
+    if output_path.exists() {
+        return Err(format!("ERROR: Output already exists: {}", output_path.display()));
+    }
+
     if !hash_path.exists() {
         return Err(format!("ERROR: Hash file not found: {}", hash_path.display()));
     }
 
     let hash_entries = hash::read_hash_file(&hash_path)?;
-
-    let expected_sizes: HashSet<u64> = hash_entries.iter().map(|e| e.size).collect();
-
-    let mut scanned_files = Vec::new();
-    scan_recursive(input_dir, &mut scanned_files)?;
-
-    let mut matches = match_files(&scanned_files, &hash_entries, &expected_sizes)?;
-
-    if let Some(lic_path) = license_path {
-        let lic_meta = std::fs::metadata(lic_path).map_err(|e| format!("ERROR: Failed to read license file {}: {}", lic_path.display(), e))?;
-        let lic_size = lic_meta.len();
-
-        for (idx, entry) in hash_entries.iter().enumerate() {
-            let parts: Vec<&str> = entry.path.trim_start_matches('/').split('/').collect();
-            let is_license_rif = parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") && parts[3].ends_with(".rif");
-            if entry.size == lic_size && is_license_rif {
-                println!("Using license override for: {}", entry.path);
-                matches.insert(idx, lic_path.to_path_buf());
-            }
-        }
-    }
-
-    if output_path.exists() {
-        println!("All matching files found");
-        return Ok(());
-    }
+    let matches = resolve_files(input_dir, &hash_entries)?;
 
     if matches.len() != hash_entries.len() {
         let mut unmatched = Vec::new();
@@ -89,6 +104,16 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
         skeleton::decompress_skeleton(&skeleton_zst_path, &output_path).map_err(|e| format!("ERROR: Failed to decompress skeleton {}: {}", skeleton_zst_path.display(), e))?;
     }
 
+    {
+        let mut f = File::open(&output_path).map_err(|e| format!("ERROR: Failed to open skeleton for validation: {}", e))?;
+        let mut buf = [0u8; 32];
+        f.read_exact(&mut buf).map_err(|e| format!("ERROR: Failed to read skeleton header: {}", e))?;
+        if !common::validate_sony_magic(&buf) {
+            let _ = std::fs::remove_file(&output_path);
+            return Err("ERROR: Skeleton is not a valid psvita image skeleton".to_string());
+        }
+    }
+
     let img_header = {
         let mut f = File::open(&output_path).map_err(|e| format!("ERROR: Failed to open output to read header: {}", e))?;
         header::parse(&mut f, file_size)?
@@ -107,6 +132,13 @@ pub fn run(input_dir: &Path, license_path: Option<&Path>) -> Result<(), String> 
     println!("Rebuilt: {}", output_path.display());
 
     Ok(())
+}
+
+fn resolve_files(input_dir: &Path, hash_entries: &[HashEntry]) -> Result<HashMap<usize, PathBuf>, String> {
+    let expected_sizes: HashSet<u64> = hash_entries.iter().map(|e| e.size).collect();
+    let mut scanned_files = Vec::new();
+    scan_recursive(input_dir, &mut scanned_files)?;
+    match_files(&scanned_files, hash_entries, &expected_sizes)
 }
 
 fn insert_img_partitions(output_path: &Path, img_header: &header::ImgHeader, input_dir: &Path) -> Result<(), String> {

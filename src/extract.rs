@@ -2,24 +2,49 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const HEADER_SKIP: u64 = 512;
-
 use sha2::{Digest, Sha256};
 
+use crate::common::{self, BLOCK_SIZE};
 use crate::exfat::{self, BYTES_PER_SECTOR, CLUSTER_SIZE};
 use crate::hash::{self, HashEntry};
-use crate::header::{self, FileSystem, Partition, PartitionCode};
+use crate::header::{self, FileSystem, Partition};
 use crate::skeleton::SkeletonWriter;
 
-pub(crate) const BLOCK_SIZE: u64 = 512;
+use crate::common::BLACKFIN_MAGIC;
+use crate::common::{BLACKFIN_OFFSET, BLACKFIN_SIZE, HEADER_SKIP, LIC1_OFFSET, LIC1_SIZE, LIC2_OFFSET, LIC2_SIZE, UNK_OFFSET, UNK_SIZE};
+
+struct FileData {
+    sfo: Option<Vec<u8>>,
+    pup: Option<Vec<u8>>,
+}
 
 const CHUNK_SIZE: usize = 64 * 1024;
 
-pub fn run(path: &Path) -> Result<(), String> {
+pub fn analyze(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        return common::iter_image_files(path, |p| run(p, false));
+    }
+    run(path, false)
+}
+
+pub fn extract(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        return common::iter_image_files(path, |p| run(p, true));
+    }
+    run(path, true)
+}
+
+fn run(path: &Path, extract: bool) -> Result<(), String> {
+    let mut file_data = FileData { sfo: None, pup: None };
     let file = File::open(path).map_err(|e| format!("ERROR: Failed to open file: {}", e))?;
 
-    println!("Extracting {}", path.display());
+    if extract {
+        println!("Extracting {}", path.display());
+    } else {
+        println!("Analyzing {}", path.display());
+    }
     let file_size = file.metadata().map_err(|e| format!("ERROR: Failed to get file metadata: {}", e))?.len();
+    common::check_file_size(file_size, path)?;
 
     let mut reader = BufReader::new(file);
 
@@ -32,32 +57,47 @@ pub fn run(path: &Path) -> Result<(), String> {
         reader.seek(SeekFrom::Start(0)).map_err(|e| format!("ERROR: Failed to seek to start: {}", e))?;
         0
     };
-    let data_size = file_size - data_offset;
+    let psv_header = header::parse(&mut reader, file_size - data_offset)?;
 
-    let psv_header = header::parse(&mut reader, data_size)?;
-
-    psv_header.print(data_size);
+    psv_header.print(file_size - data_offset, extract);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_stem().ok_or("ERROR: Can't get file name")?.to_string_lossy();
+    let basename = parent.join(name.as_ref());
+
+    if extract {
+        if data_offset > 0 {
+            reader.seek(SeekFrom::Start(0)).map_err(|e| format!("ERROR: {}", e))?;
+            let mut hdr = vec![0u8; data_offset as usize];
+            reader.read_exact(&mut hdr).map_err(|e| format!("ERROR: Failed to read wrapper header: {}", e))?;
+            common::save_hdr(&hdr, &basename)?;
+            reader.seek(SeekFrom::Start(data_offset + BLOCK_SIZE)).map_err(|e| format!("ERROR: {}", e))?;
+        }
+
+        let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
+        let hash_path = parent.join(format!("{}.tsv", name));
+        let extract_dir = parent.join(name.as_ref());
+
+        if skeleton_path.exists() {
+            return Err(format!("ERROR: {} already exists", skeleton_path.display()));
+        }
+        if hash_path.exists() {
+            return Err(format!("ERROR: {} already exists", hash_path.display()));
+        }
+        if extract_dir.exists() {
+            return Err(format!("ERROR: {} already exists", extract_dir.display()));
+        }
+    }
 
     let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
     let hash_path = parent.join(format!("{}.tsv", name));
     let extract_dir = parent.join(name.as_ref());
 
-    if skeleton_path.exists() {
-        return Err(format!("ERROR: {} already exists", skeleton_path.display()));
-    }
-    if hash_path.exists() {
-        return Err(format!("ERROR: {} already exists", hash_path.display()));
-    }
-    if extract_dir.exists() {
-        return Err(format!("ERROR: {} already exists", extract_dir.display()));
-    }
+    let mut skeleton_writer = if extract { Some(SkeletonWriter::new(&skeleton_path).map_err(|e| format!("ERROR: Failed to create skeleton: {}", e))?) } else { None };
 
-    let mut skeleton_writer = SkeletonWriter::new(&skeleton_path).map_err(|e| format!("ERROR: Failed to create skeleton: {}", e))?;
-
-    skeleton_writer.write_bytes(&psv_header.raw).map_err(|e| format!("ERROR: Failed to write header to skeleton: {}", e))?;
+    if let Some(ref mut sw) = skeleton_writer {
+        sw.write_bytes(&psv_header.raw).map_err(|e| format!("ERROR: Failed to write header to skeleton: {}", e))?;
+    }
 
     let mut hash_entries: Vec<HashEntry> = Vec::new();
 
@@ -67,14 +107,14 @@ pub fn run(path: &Path) -> Result<(), String> {
     let part_names = header::partition_names(&sorted_partitions, |fs| matches!(fs, FileSystem::ExFat));
     let multi_partition = part_names.iter().filter(|n| n.is_some()).count() > 1;
 
-    let mut pos: u64 = BLOCK_SIZE;
+    let mut pos: u64 = data_offset + BLOCK_SIZE;
 
     for (partition, part_name) in partitions.iter().zip(part_names.iter()) {
-        let partition_start = partition.offset as u64 * BLOCK_SIZE;
+        let partition_start = data_offset + partition.offset as u64 * BLOCK_SIZE;
         let partition_size = partition.size as u64 * BLOCK_SIZE;
 
         if partition_start > pos {
-            process_gap(&mut reader, &mut skeleton_writer, pos, partition_start)?;
+            process_gap(&mut reader, &mut skeleton_writer, pos, partition_start, data_offset, &basename)?;
         } else if partition_start < pos {
             return Err(format!("ERROR: Partition at offset 0x{:X} overlaps with previous partition", partition_start));
         }
@@ -85,9 +125,13 @@ pub fn run(path: &Path) -> Result<(), String> {
                     Some(name) if multi_partition => extract_dir.join(name),
                     _ => extract_dir.clone(),
                 };
-                let num_files = process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &partition_dir, data_offset)?;
+                let num_files = process_exfat(&mut reader, &mut skeleton_writer, partition, &mut hash_entries, &partition_dir, data_offset, &basename, &mut file_data)?;
                 let display_name = partition.code.name().unwrap_or("unknown");
-                println!("{}: {} files extracted to {}", display_name, num_files, partition_dir.display());
+                if extract {
+                    println!("{}: {} files extracted to {}", display_name, num_files, partition_dir.display());
+                } else {
+                    println!("{}: {} files", display_name, num_files);
+                }
             }
             _ => {
                 let img_path = part_name.as_ref().map(|name| extract_dir.join(format!("{}.img", name)));
@@ -98,17 +142,19 @@ pub fn run(path: &Path) -> Result<(), String> {
         pos = partition_start + partition_size;
     }
 
-    let header_size = psv_header.image_size() as u64 * BLOCK_SIZE;
+    let img_end = data_offset + psv_header.image_size() as u64 * BLOCK_SIZE;
 
-    if pos < header_size.min(data_size) {
-        process_gap(&mut reader, &mut skeleton_writer, pos, header_size.min(data_size))?;
+    if pos < img_end.min(file_size) {
+        process_gap(&mut reader, &mut skeleton_writer, pos, img_end.min(file_size), data_offset, &basename)?;
     }
 
-    if data_size < header_size {
-        skeleton_writer.write_zeros(header_size - data_size).map_err(|e| format!("ERROR: Failed to write padding zeros: {}", e))?;
-    } else if data_size > header_size {
+    if file_size < img_end {
+        if let Some(ref mut sw) = skeleton_writer {
+            sw.write_zeros(img_end - file_size).map_err(|e| format!("ERROR: Failed to write padding zeros: {}", e))?;
+        }
+    } else if file_size > img_end {
         let mut buf = vec![0u8; CHUNK_SIZE as usize];
-        let mut remaining = data_size - header_size.max(pos);
+        let mut remaining = file_size - img_end.max(pos);
         let mut has_nonzero = false;
         while remaining > 0 {
             let to_read = remaining.min(CHUNK_SIZE as u64) as usize;
@@ -119,28 +165,23 @@ pub fn run(path: &Path) -> Result<(), String> {
             remaining -= to_read as u64;
         }
         if has_nonzero {
-            println!("WARNING: File has {} bytes of non-zero data past the header image size", data_size - header_size);
+            println!("WARNING: File has {} bytes of non-zero data past the header image size", file_size - img_end);
         }
     }
 
-    skeleton_writer.finish().map_err(|e| format!("ERROR: Failed to finalize skeleton: {}", e))?;
+    if let Some(sw) = skeleton_writer {
+        sw.finish().map_err(|e| format!("ERROR: Failed to finalize skeleton: {}", e))?;
+        hash::write_hash_file(&hash_path, &hash_entries).map_err(|e| format!("ERROR: Failed to write hash file: {}", e))?;
+        println!("File hashes saved to: {}", hash_path.display());
+        println!("Image skeleton saved to: {}", skeleton_path.display());
+    }
 
-    hash::write_hash_file(&hash_path, &hash_entries).map_err(|e| format!("ERROR: Failed to write hash file: {}", e))?;
-
-    println!("File hashes saved to: {}", hash_path.display());
-    println!("Image skeleton saved to: {}", skeleton_path.display());
-
-    let gamero_dir = part_names
-        .iter()
-        .zip(sorted_partitions.iter())
-        .find_map(|(name, p)| if matches!(p.code, PartitionCode::Gro0) { name.as_ref().filter(|_| multi_partition).map(|n| extract_dir.join(n)) } else { None });
-    let game_dir = gamero_dir.as_deref().unwrap_or(&extract_dir);
-    validate_game(game_dir, &hash_entries);
+    validate_game(&file_data, &hash_entries);
 
     Ok(())
 }
 
-fn copy_region(reader: &mut impl Read, writer: &mut SkeletonWriter, offset: u64, size: u64) -> Result<bool, String> {
+fn copy_region(reader: &mut impl Read, writer: &mut Option<SkeletonWriter>, offset: u64, size: u64) -> Result<bool, String> {
     let mut remaining = size;
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut all_zeros = true;
@@ -153,7 +194,9 @@ fn copy_region(reader: &mut impl Read, writer: &mut SkeletonWriter, offset: u64,
             all_zeros = false;
         }
 
-        writer.write_bytes(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write at offset 0x{:X}: {}", offset, e))?;
+        if let Some(sw) = writer {
+            sw.write_bytes(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write at offset 0x{:X}: {}", offset, e))?;
+        }
 
         remaining -= to_read as u64;
     }
@@ -161,46 +204,62 @@ fn copy_region(reader: &mut impl Read, writer: &mut SkeletonWriter, offset: u64,
     Ok(all_zeros)
 }
 
-fn process_gap(reader: &mut impl Read, writer: &mut SkeletonWriter, start: u64, end: u64) -> Result<(), String> {
-    let unk_start = 0x1C00;
-    let unk_end = 0x1C00 + 0x260;
+fn process_gap(reader: &mut impl Read, writer: &mut Option<SkeletonWriter>, start: u64, end: u64, data_offset: u64, basename: &Path) -> Result<(), String> {
+    let special: &[(u64, u64)] = &[(data_offset + UNK_OFFSET, data_offset + UNK_OFFSET + UNK_SIZE), (data_offset + BLACKFIN_OFFSET, data_offset + BLACKFIN_OFFSET + BLACKFIN_SIZE)];
 
-    if unk_start >= start && unk_start < end {
-        if unk_start > start {
-            let all_zeros = copy_region(reader, writer, start, unk_start - start)?;
+    let mut pos = start;
+
+    for &(region_start, region_end) in special {
+        if region_start >= end || region_end <= start {
+            continue;
+        }
+        let region_start = region_start.max(start);
+        let region_end = region_end.min(end);
+
+        if region_start > pos {
+            let all_zeros = copy_region(reader, writer, pos, region_start - pos)?;
             if !all_zeros {
-                println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, unk_start);
+                println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", pos, region_start);
             }
         }
 
-        let unk_region_end = unk_end.min(end);
-        let unk_len = unk_region_end - unk_start;
-        let mut unk_buf = vec![0u8; unk_len as usize];
-        reader.read_exact(&mut unk_buf).map_err(|e| format!("ERROR: Failed to read UNK region at 0x{:X}: {}", unk_start, e))?;
+        let len = region_end - region_start;
+        let mut buf = vec![0u8; len as usize];
+        reader.read_exact(&mut buf).map_err(|e| format!("ERROR: Failed to read region at 0x{:X}: {}", region_start, e))?;
 
-        if unk_buf.iter().any(|&b| b != 0) {
-            println!("Wiped unique header data from skeleton");
-        }
-
-        writer.write_zeros(unk_len).map_err(|e| format!("ERROR: Failed to write zeros for UNK region: {}", e))?;
-
-        if unk_region_end < end {
-            let all_zeros = copy_region(reader, writer, unk_region_end, end - unk_region_end)?;
-            if !all_zeros {
-                println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", unk_region_end, end);
+        if region_start == data_offset + UNK_OFFSET {
+            if buf.iter().any(|&b| b != 0) {
+                if writer.is_some() {
+                    common::save_unk(&buf, basename)?;
+                    println!("Wiped unique header data from skeleton");
+                }
+            }
+        } else if region_start == data_offset + BLACKFIN_OFFSET {
+            if buf.len() >= BLACKFIN_MAGIC.len() && &buf[..BLACKFIN_MAGIC.len()] == BLACKFIN_MAGIC {
+                if writer.is_some() {
+                    common::save_blackfin(&buf, basename)?;
+                    println!("Wiped BlackFin data from skeleton");
+                }
             }
         }
-    } else {
-        let all_zeros = copy_region(reader, writer, start, end - start)?;
+
+        if let Some(sw) = writer {
+            sw.write_zeros(len).map_err(|e| format!("ERROR: Failed to write zeros for region at 0x{:X}: {}", region_start, e))?;
+        }
+        pos = region_end;
+    }
+
+    if pos < end {
+        let all_zeros = copy_region(reader, writer, pos, end - pos)?;
         if !all_zeros {
-            println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", start, end);
+            println!("WARNING: Gap region 0x{:X}-0x{:X} contains non-zero data", pos, end);
         }
     }
 
     Ok(())
 }
 
-fn process_non_exfat(reader: &mut impl Read, writer: &mut SkeletonWriter, partition: &Partition, img_path: Option<&Path>) -> Result<(), String> {
+fn process_non_exfat(reader: &mut impl Read, writer: &mut Option<SkeletonWriter>, partition: &Partition, img_path: Option<&Path>) -> Result<(), String> {
     let partition_start = partition.offset as u64 * BLOCK_SIZE;
     let partition_size = partition.size as u64 * BLOCK_SIZE;
     let mut buf = vec![0u8; CHUNK_SIZE];
@@ -218,8 +277,10 @@ fn process_non_exfat(reader: &mut impl Read, writer: &mut SkeletonWriter, partit
         }
         remaining -= to_read as u64;
     }
-    writer.write_zeros(partition_size).map_err(|e| format!("ERROR: Failed to write zeros for {} partition: {}", partition.filesystem, e))?;
-    if !all_zeros {
+    if let Some(sw) = writer {
+        sw.write_zeros(partition_size).map_err(|e| format!("ERROR: Failed to write zeros for {} partition: {}", partition.filesystem, e))?;
+    }
+    if !all_zeros && writer.is_some() {
         if let Some(path) = img_path {
             std::fs::write(path, &data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
             println!("{} partition at 0x{:X}: extracted to {}", partition.filesystem, partition_start, path.display());
@@ -230,11 +291,13 @@ fn process_non_exfat(reader: &mut impl Read, writer: &mut SkeletonWriter, partit
 
 fn process_exfat(
     reader: &mut (impl Read + Seek),
-    writer: &mut SkeletonWriter,
+    writer: &mut Option<SkeletonWriter>,
     partition: &Partition,
     hash_entries: &mut Vec<HashEntry>,
     extract_dir: &Path,
     data_offset: u64,
+    basename: &Path,
+    file_data: &mut FileData,
 ) -> Result<usize, String> {
     let partition_start = partition.offset as u64 * BLOCK_SIZE;
     let partition_size = partition.size as u64 * BLOCK_SIZE;
@@ -256,14 +319,20 @@ fn process_exfat(
         })
         .collect();
 
-    for file_info in &ctx.files {
-        let relative_path = file_info.path.trim_start_matches('/');
-        let out_path = extract_dir.join(relative_path);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("ERROR: Failed to create directory {}: {}", parent.display(), e))?;
+    let sfo_idx = ctx.files.iter().position(|f| f.path.eq_ignore_ascii_case("/gc/param.sfo"));
+    let pup_idx = ctx.files.iter().position(|f| f.path.eq_ignore_ascii_case("/psp2/update/psp2updat.pup"));
+    let mut sfo_buf: Vec<u8> = Vec::new();
+    let mut pup_buf: Vec<u8> = Vec::new();
+
+    if writer.is_some() {
+        for file_info in &ctx.files {
+            let out_path = extract_dir.join(file_info.path.trim_start_matches('/'));
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("ERROR: Failed to create directory {}: {}", parent.display(), e))?;
+            }
+            let out_file = File::create(&out_path).map_err(|e| format!("ERROR: Failed to create file {}: {}", out_path.display(), e))?;
+            file_writers.push(Some(BufWriter::new(out_file)));
         }
-        let out_file = File::create(&out_path).map_err(|e| format!("ERROR: Failed to create file {}: {}", out_path.display(), e))?;
-        file_writers.push(Some(BufWriter::new(out_file)));
     }
 
     let cluster_size = CLUSTER_SIZE as usize;
@@ -277,7 +346,9 @@ fn process_exfat(
     while pre_remaining > 0 {
         let to_read = pre_remaining.min(CHUNK_SIZE);
         reader.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read exFAT pre-heap: {}", e))?;
-        writer.write_bytes(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write exFAT pre-heap: {}", e))?;
+        if let Some(sw) = writer {
+            sw.write_bytes(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write exFAT pre-heap: {}", e))?;
+        }
         pre_remaining -= to_read;
     }
 
@@ -289,33 +360,56 @@ fn process_exfat(
         reader.read_exact(&mut cluster_buf[..actual_size]).map_err(|e| format!("ERROR: Failed to read cluster {}: {}", cluster_number, e))?;
 
         if ctx.metadata_clusters.contains(&cluster_number) {
-            writer.write_bytes(&cluster_buf[..actual_size]).map_err(|e| format!("ERROR: Failed to write metadata cluster: {}", e))?;
+            if let Some(sw) = writer {
+                sw.write_bytes(&cluster_buf[..actual_size]).map_err(|e| format!("ERROR: Failed to write metadata cluster: {}", e))?;
+            }
         } else if let Some(&file_idx) = cluster_to_file.get(&cluster_number) {
             let remaining = remaining_bytes[file_idx];
             if remaining > 0 {
                 let bytes_to_hash = remaining.min(actual_size as u64) as usize;
                 let file_offset = ctx.files[file_idx].size - remaining;
 
-                if is_license_rif[file_idx] {
+                if sfo_idx == Some(file_idx) {
+                    sfo_buf.extend_from_slice(&cluster_buf[..bytes_to_hash]);
+                    if remaining_bytes[file_idx] - bytes_to_hash as u64 == 0 {
+                        file_data.sfo = Some(std::mem::take(&mut sfo_buf));
+                    }
+                }
+                if pup_idx == Some(file_idx) {
+                    pup_buf.extend_from_slice(&cluster_buf[..bytes_to_hash]);
+                    if remaining_bytes[file_idx] - bytes_to_hash as u64 == 0 {
+                        file_data.pup = Some(std::mem::take(&mut pup_buf));
+                    }
+                }
+
+                if is_license_rif[file_idx] && writer.is_some() {
+                    if file_offset == 0 {
+                        let verbatim = cluster_buf[..bytes_to_hash.min(ctx.files[file_idx].size as usize)].to_vec();
+                        common::save_rif(&verbatim, basename)?;
+                    }
                     if wipe_license_data(&mut cluster_buf, file_offset, bytes_to_hash) {
                         println!("Wiped unique license data from {}", ctx.files[file_idx].path);
                     }
                 }
 
                 hashers[file_idx].update(&cluster_buf[..bytes_to_hash]);
-                if let Some(ref mut w) = file_writers[file_idx] {
+                if let Some(ref mut w) = file_writers.get_mut(file_idx).and_then(|w| w.as_mut()) {
                     w.write_all(&cluster_buf[..bytes_to_hash]).map_err(|e| format!("ERROR: Failed to write file data: {}", e))?;
                 }
                 remaining_bytes[file_idx] -= bytes_to_hash as u64;
                 if remaining_bytes[file_idx] == 0 {
-                    if let Some(w) = file_writers[file_idx].take() {
+                    if let Some(w) = file_writers.get_mut(file_idx).and_then(|w| w.take()) {
                         w.into_inner().map_err(|e| format!("ERROR: Failed to flush file: {}", e))?;
                     }
                 }
             }
-            writer.write_zeros(actual_size as u64).map_err(|e| format!("ERROR: Failed to write zeros for file cluster: {}", e))?;
+            if let Some(sw) = writer {
+                sw.write_zeros(actual_size as u64).map_err(|e| format!("ERROR: Failed to write zeros for file cluster: {}", e))?;
+            }
         } else {
-            writer.write_bytes(&cluster_buf[..actual_size]).map_err(|e| format!("ERROR: Failed to write free cluster: {}", e))?;
+            if let Some(sw) = writer {
+                sw.write_bytes(&cluster_buf[..actual_size]).map_err(|e| format!("ERROR: Failed to write free cluster: {}", e))?;
+            }
         }
     }
 
@@ -326,16 +420,22 @@ fn process_exfat(
         while trail_remaining > 0 {
             let to_read = trail_remaining.min(CHUNK_SIZE);
             reader.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read trailing partition data: {}", e))?;
-            writer.write_bytes(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write trailing partition data: {}", e))?;
+            if let Some(sw) = writer {
+                sw.write_bytes(&buf[..to_read]).map_err(|e| format!("ERROR: Failed to write trailing partition data: {}", e))?;
+            }
             trail_remaining -= to_read;
         }
     }
 
-    for (file_idx, file_info) in ctx.files.iter().enumerate() {
-        if let Some(w) = file_writers[file_idx].take() {
-            w.into_inner().map_err(|e| format!("ERROR: Failed to flush file: {}", e))?;
+    if writer.is_some() {
+        for (file_idx, _) in ctx.files.iter().enumerate() {
+            if let Some(w) = file_writers[file_idx].take() {
+                w.into_inner().map_err(|e| format!("ERROR: Failed to flush file: {}", e))?;
+            }
         }
+    }
 
+    for (file_idx, file_info) in ctx.files.iter().enumerate() {
         let hasher = std::mem::replace(&mut hashers[file_idx], Sha256::new());
         let hash_result = hasher.finalize();
         let sha256 = {
@@ -387,37 +487,31 @@ fn parse_psf(data: Vec<u8>) -> std::collections::HashMap<String, Vec<u8>> {
     map
 }
 
-fn read_bytes(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
-    let mut f = File::open(path).ok()?;
-    f.seek(SeekFrom::Start(offset)).ok()?;
-    let mut buf = vec![0u8; len];
-    f.read_exact(&mut buf).ok()?;
-    Some(buf)
+fn bytes_at(data: &[u8], offset: usize, len: usize) -> Option<Vec<u8>> {
+    if offset + len > data.len() {
+        return None;
+    }
+    Some(data[offset..offset + len].to_vec())
 }
 
-fn read_version(path: &Path, offset: u64) -> Option<[u8; 4]> {
-    let bytes = read_bytes(path, offset, 4)?;
-    Some([bytes[0], bytes[1], bytes[2], bytes[3]])
+fn version_at(data: &[u8], offset: usize) -> Option<[u8; 4]> {
+    let b = bytes_at(data, offset, 4)?;
+    Some([b[0], b[1], b[2], b[3]])
 }
 
 fn format_version(b: [u8; 4]) -> String {
     format!("{}.{:02X}", b[3], b[2])
 }
 
-fn read_psf(sfo_path: &Path) -> Option<Vec<u8>> {
-    let mut f = File::open(sfo_path).ok()?;
-    let file_len = f.seek(SeekFrom::End(0)).ok()?;
-    if file_len < 0x604 {
+fn parse_sfo_psf(sfo: &[u8]) -> Option<Vec<u8>> {
+    if sfo.len() < 0x604 {
         return None;
     }
-    let available = ((file_len - 0x600) as usize).min(0x1000);
-    f.seek(SeekFrom::Start(0x600)).ok()?;
-    let mut buf = vec![0u8; available];
-    f.read_exact(&mut buf).ok()?;
+    let buf = &sfo[0x600..];
     if &buf[0..4] != b"\0PSF" {
         return None;
     }
-    Some(buf)
+    Some(buf[..buf.len().min(0x1000)].to_vec())
 }
 
 fn psf_str(val: &[u8]) -> &str {
@@ -430,11 +524,10 @@ fn psf_ver_bytes(val: &[u8]) -> Option<[u8; 4]> {
 
 const KNOWN_PSF_KEYS: &[&str] = &["TITLE_ID", "CATEGORY", "VERSION", "PSP2_SYSTEM_VER", "PSP2_SYSTEM_ROOT_VER", "PSP2_DISP_VER", "SYSPRM"];
 
-fn validate_game(game_dir: &Path, hash_entries: &[HashEntry]) {
-    let sfo_path = game_dir.join("gc/param.sfo");
-    let psf = read_psf(&sfo_path).map(parse_psf);
+fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
+    let psf = file_data.sfo.as_deref().and_then(parse_sfo_psf).map(parse_psf);
 
-    let title_id = read_bytes(&sfo_path, 0x410, 9).map(|b| String::from_utf8_lossy(&b).trim_end_matches('\0').to_string());
+    let title_id = file_data.sfo.as_deref().and_then(|s| bytes_at(s, 0x410, 9)).map(|b| String::from_utf8_lossy(&b).trim_end_matches('\0').to_string());
 
     if let Some(ref id) = title_id {
         if let Some(ref p) = psf {
@@ -490,7 +583,7 @@ fn validate_game(game_dir: &Path, hash_entries: &[HashEntry]) {
         }
     }
 
-    let sfo_ver = read_version(&sfo_path, 0x40C);
+    let sfo_ver = file_data.sfo.as_deref().and_then(|s| version_at(s, 0x40C));
     let psf_ver = psf.as_ref().and_then(|p| p.get("PSP2_SYSTEM_VER").and_then(|v| psf_ver_bytes(v)));
     let psf_root_ver = psf.as_ref().and_then(|p| p.get("PSP2_SYSTEM_ROOT_VER").and_then(|v| psf_ver_bytes(v)));
     let psf_disp_ver = psf.as_ref().and_then(|p| p.get("PSP2_DISP_VER").map(|v| psf_str(v).to_string()));
@@ -521,7 +614,7 @@ fn validate_game(game_dir: &Path, hash_entries: &[HashEntry]) {
             println!("WARNING: System Update version mismatch between SFO header (0x40C: {}) and PSP2_DISP_VER ({})", format_version(s), d);
         }
     }
-    let pup_ver = read_version(&game_dir.join("psp2/update/psp2updat.pup"), 0x10);
+    let pup_ver = file_data.pup.as_deref().and_then(|p| version_at(p, 0x10));
     match (sfo_ver, pup_ver) {
         (Some(s), Some(p)) if s == p => println!("System Update version: {}", format_version(s)),
         (Some(s), Some(p)) => {
@@ -596,13 +689,8 @@ fn validate_game(game_dir: &Path, hash_entries: &[HashEntry]) {
 }
 
 fn wipe_license_data(buf: &mut [u8], file_offset: u64, chunk_len: usize) -> bool {
-    const LIC1_START: u64 = 0x50;
-    const LIC1_END: u64 = 0x50 + 0x10;
-    const LIC2_START: u64 = 0xA0;
-    const LIC2_END: u64 = 0xA0 + 0x160;
-
-    let a = zero_range(buf, file_offset, chunk_len, LIC1_START, LIC1_END);
-    let b = zero_range(buf, file_offset, chunk_len, LIC2_START, LIC2_END);
+    let a = zero_range(buf, file_offset, chunk_len, LIC1_OFFSET, LIC1_OFFSET + LIC1_SIZE);
+    let b = zero_range(buf, file_offset, chunk_len, LIC2_OFFSET, LIC2_OFFSET + LIC2_SIZE);
     a || b
 }
 

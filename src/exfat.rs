@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 
-pub const BYTES_PER_SECTOR: u32 = 512;
+pub const BYTES_PER_SECTOR: u32 = crate::common::BLOCK_SIZE as u32;
 pub const SECTORS_PER_CLUSTER: u32 = 64;
 pub const CLUSTER_SIZE: u32 = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER;
 

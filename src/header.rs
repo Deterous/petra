@@ -136,14 +136,18 @@ impl ImgHeader {
         u32::from_le_bytes([self.raw[0x24], self.raw[0x25], self.raw[0x26], self.raw[0x27]])
     }
 
-    pub fn print(&self, actual_file_size: u64) {
+    pub fn print(&self, actual_file_size: u64, extract: bool) {
         if self.version() != 3 {
             println!("WARNING: Unexpected header version: {}", self.version());
         }
 
         let device_size_bytes = self.image_size() as u64 * 512;
         if actual_file_size > device_size_bytes {
-            println!("Trimmed skeleton to device size: {} bytes ({} blocks)", device_size_bytes, self.image_size());
+            if extract {
+                println!("Trimmed skeleton to device size: {} bytes ({} blocks)", device_size_bytes, self.image_size());
+            } else {
+                println!("Image larger than device size: {} bytes ({} blocks)", device_size_bytes, self.image_size());
+            }
         } else if actual_file_size < device_size_bytes {
             println!("WARNING: File is smaller than device size: header says {} bytes ({} blocks), actual file is {} bytes", device_size_bytes, self.image_size(), actual_file_size);
         }

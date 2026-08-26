@@ -1,35 +1,55 @@
+mod common;
 mod exfat;
 mod extract;
 mod hash;
 mod header;
 mod rebuild;
+mod repair;
 mod skeleton;
+mod strip;
 
 use std::env;
 use std::path::Path;
 use std::process::exit;
 
+#[cfg(windows)]
+const EXE: &str = "petra.exe";
+#[cfg(not(windows))]
+const EXE: &str = "petra";
+
+fn usage() {
+    println!("PSVita extract/transform/rebuild/analyze (c) Deterous 2026");
+    println!();
+    println!("Usage:");
+    println!("  {EXE} extract <image>     Extracts game files and creates skeleton");
+    println!("  {EXE} strip   <image>     Strips image of unique data, saves them separately");
+    println!("  {EXE} repair  <image>     Applies sidecar files to a given stripped image");
+    println!("  {EXE} rebuild <folder/>   Rebuilds an image from skeleton and folder of files");
+    println!("  {EXE} analyze <image>     Scans an image and prints dump image metadata");
+    println!("  {EXE} verify  <folder/>   Compares a folder of files with file hashes (.tsv)");
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 || args.len() > 3 {
-        println!("PSVita extract/transform/rebuild/analyze (c) Deterous 2026");
-        #[cfg(windows)]
-        println!("Usage: petra.exe <path> [license.rif]");
-        #[cfg(not(windows))]
-        println!("Usage: petra <path> [license.rif]");
+    if args.len() != 3 {
+        usage();
         exit(1);
     }
 
-    let path = Path::new(&args[1]);
-    let license_path = args.get(2).map(|s| Path::new(s.as_str()));
+    let path = Path::new(&args[2]);
 
-    let result = if path.is_dir() {
-        rebuild::run(path, license_path)
-    } else if path.is_file() {
-        if license_path.is_some() { Err("ERROR: License file argument is only used for rebuild (directory input)".to_string()) } else { extract::run(path) }
-    } else {
-        Err("ERROR: Input path does not exist or is not a file/directory".to_string())
+    let result = match args[1].as_str() {
+        "extract" => extract::extract(path),
+        "strip" => strip::run(path),
+        "repair" => repair::run(path),
+        "rebuild" => rebuild::run(path),
+        "analyze" => extract::analyze(path),
+        "verify" => rebuild::verify(path),
+        _ => {
+            usage();
+            exit(1);
+        }
     };
 
     if let Err(e) = result {
