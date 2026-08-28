@@ -37,11 +37,10 @@ pub fn verify(input_dir: &Path) -> Result<(), String> {
     if unmatched.is_empty() {
         println!("All {} files found and verified", hash_entries.len());
     } else {
-        let mut msg = format!("ERROR: {} file(s) missing or mismatched:\n", unmatched.len());
+        println!("ERROR: {} file(s) missing or mismatched:", unmatched.len());
         for entry in &unmatched {
-            msg.push_str(&format!("  sha256={} size={} ({})\n", entry.sha256, entry.size, entry.path));
+            println!("  sha256={} size={} ({})", entry.sha256, entry.size, entry.path);
         }
-        return Err(msg.trim_end().to_string());
     }
 
     Ok(())
@@ -64,6 +63,14 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
         return Err(format!("ERROR: Output already exists: {}", output_path.display()));
     }
 
+    let use_raw_skeleton = if skeleton_raw_path.exists() {
+        true
+    } else if skeleton_zst_path.exists() {
+        false
+    } else {
+        return Err(format!("ERROR: Skeleton not found: {}", skeleton_zst_path.display()));
+    };
+
     if !hash_path.exists() {
         return Err(format!("ERROR: Hash file not found: {}", hash_path.display()));
     }
@@ -78,21 +85,12 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
                 unmatched.push(entry);
             }
         }
-        let mut msg = format!("ERROR: Missing {} file(s) for rebuild:\n", unmatched.len());
+        let mut msg = format!("ERROR: Missing {} file(s) for rebuild:", unmatched.len());
         for entry in &unmatched {
-            msg.push_str(&format!("  sha256={} size={} ({})\n", entry.sha256, entry.size, entry.path));
+            msg.push_str(&format!("\n  sha256={} size={} ({})", entry.sha256, entry.size, entry.path));
         }
-        return Err(msg.trim_end().to_string());
+        return Err(msg);
     }
-
-    let use_raw_skeleton = if skeleton_raw_path.exists() {
-        true
-    } else if skeleton_zst_path.exists() {
-        false
-    } else {
-        println!("All matching files found, to rebuild the image provide: {}", skeleton_zst_path.file_name().unwrap().to_string_lossy());
-        return Ok(());
-    };
 
     let file_size = if use_raw_skeleton { skeleton::read_image_size_raw(&skeleton_raw_path)? } else { skeleton::read_image_size(&skeleton_zst_path)? };
 

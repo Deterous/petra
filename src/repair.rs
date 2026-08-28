@@ -98,6 +98,11 @@ fn run_single(path: &Path) -> Result<(), String> {
         }
     }
 
+    if !hdr_path.exists() && !unk_path.exists() && !blackfin_path.exists() && !rif_path.exists() {
+        println!("Nothing to repair: {}", path.display());
+        return Ok(());
+    }
+
     println!("Done: {}", path.display());
     Ok(())
 }

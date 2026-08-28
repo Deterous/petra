@@ -167,6 +167,10 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
         if has_nonzero {
             println!("WARNING: File has {} bytes of non-zero data past the header image size", file_size - img_end);
         }
+        // TODO: Solve trimming
+        if let Some(ref mut sw) = skeleton_writer {
+            sw.write_zeros(file_size - img_end.max(pos)).map_err(|e| format!("ERROR: Failed to write trailing zeros to skeleton: {}", e))?;
+        }
     }
 
     if let Some(sw) = skeleton_writer {
