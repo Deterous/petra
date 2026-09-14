@@ -2,6 +2,11 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crc32fast::Hasher as Crc32Hasher;
+use sha1::Digest as Sha1Digest;
+use sha1::Sha1;
+use sha2::{Digest as Sha2Digest, Sha256};
+
 use crate::exfat::{self, CLUSTER_SIZE};
 use crate::header;
 
@@ -112,6 +117,69 @@ pub fn save_rif(data: &[u8], basename: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+pub fn save_footer(data: &[u8], basename: &Path) -> Result<bool, String> {
+    if data.iter().any(|&b| b != 0) {
+        let path = basename.with_extension("ftr");
+        fs::write(&path, data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
+        println!("Saved: {}", path.display());
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+pub fn hash_file(file: &mut File, file_size: u64) -> Result<(u32, String, String, String), String> {
+    print!("Hashing...");
+    std::io::stdout().flush().ok();
+    file.seek(SeekFrom::Start(0)).map_err(|e| format!("ERROR: {}", e))?;
+    let mut crc = Crc32Hasher::new();
+    let mut md5_ctx = md5::Context::new();
+    let mut sha1 = Sha1::new();
+    let mut sha256 = Sha256::new();
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    let mut remaining = file_size;
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        file.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read for hashing: {}", e))?;
+        crc.update(&buf[..to_read]);
+        md5_ctx.consume(&buf[..to_read]);
+        Sha1Digest::update(&mut sha1, &buf[..to_read]);
+        Sha2Digest::update(&mut sha256, &buf[..to_read]);
+        remaining -= to_read as u64;
+    }
+    let crc_val = crc.finalize();
+    let to_hex = |b: &[u8]| b.iter().fold(String::new(), |mut s, x| { use std::fmt::Write; write!(s, "{:02x}", x).unwrap(); s });
+    let md5_str = to_hex(&md5_ctx.compute().0);
+    let sha1_str = to_hex(&Sha1Digest::finalize(sha1));
+    let sha256_str = to_hex(&Sha2Digest::finalize(sha256));
+    println!("Done");
+    Ok((crc_val, md5_str, sha1_str, sha256_str))
+}
+
+pub fn save_dat(roms: &[(&str, u64, u32, &str, &str, &str)], path: &Path) -> Result<(), String> {
+    let xml = roms.iter().map(|(name, size, crc, md5, sha1, sha256)|
+        format!("<rom name=\"{}\" size=\"{}\" crc=\"{:08x}\" md5=\"{}\" sha1=\"{}\" sha256=\"{}\"/>", name, size, crc, md5, sha1, sha256)
+    ).collect::<Vec<_>>().join("\n");
+    fs::write(path, xml).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
+    println!("Saved: {}", path.display());
+    Ok(())
+}
+
+pub fn read_dat(basename: &Path) -> Result<Option<(String, u64)>, String> {
+    let path = basename.with_extension("dat");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path).map_err(|e| format!("ERROR: Failed to read {}: {}", path.display(), e))?;
+    let parse_attr = |attr: &str| -> Option<&str> {
+        let needle = format!("{}=\"", attr);
+        let start = content.find(needle.as_str())? + needle.len();
+        let end = content[start..].find('"')? + start;
+        Some(&content[start..end])
+    };
+    let name = parse_attr("name").ok_or_else(|| format!("ERROR: Could not parse name from {}", path.display()))?.to_string();
+    let size: u64 = parse_attr("size").ok_or_else(|| format!("ERROR: Could not parse size from {}", path.display()))?.parse().map_err(|_| format!("ERROR: Invalid size in {}", path.display()))?;
+    Ok(Some((name, size)))
+}
 pub fn check_file_size(file_size: u64, path: &Path) -> Result<(), String> {
     if file_size < 2 * BLOCK_SIZE {
         return Err(format!("ERROR: {} is too small to be a valid psvita image ({} bytes)", path.display(), file_size));

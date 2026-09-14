@@ -1,13 +1,16 @@
 [package]
 name = "petra"
-version = "1.5.2"
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-3.0-only"
 
 [dependencies]
-zstd = "0.13"
+crc32fast = "1"
+md5 = "0.7"
+sha1 = "0.10"
 sha2 = "0.10"
+zstd = "0.13"
 
 [profile.release]
 codegen-units = 1

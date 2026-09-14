@@ -18,6 +18,8 @@ fn run_single(path: &Path) -> Result<(), String> {
     let unk_path = basename.with_extension("unk");
     let blackfin_path = basename.with_extension("blackfin");
     let rif_path = basename.with_extension("rif");
+    let footer_path = basename.with_extension("ftr");
+    let dat = common::read_dat(&basename)?;
 
     let mut file = File::options().read(true).write(true).open(path).map_err(|e| format!("ERROR: Failed to open {}: {}", path.display(), e))?;
     let mut file_size = file.metadata().map_err(|e| format!("ERROR: {}", e))?.len();
@@ -27,6 +29,16 @@ fn run_single(path: &Path) -> Result<(), String> {
     file.read_exact(&mut magic).map_err(|e| format!("ERROR: Failed to read magic: {}", e))?;
     let has_header = &magic == b"PSV\0" || &magic == b"VCI\0";
     let mut data_offset: u64 = if has_header { HEADER_SKIP } else { 0 };
+
+    if !hdr_path.exists() && !unk_path.exists() && !blackfin_path.exists() && !rif_path.exists() && !footer_path.exists() {
+        let needs_repair = dat.as_ref().map_or(false, |(orig_name, target_size)| {
+            file_size < target_size || path.with_file_name(&orig_name) != path
+        });
+        if !needs_repair {
+            println!("Nothing to repair: {}", path.display());
+            return Ok(());
+        }
+    }
 
     if hdr_path.exists() {
         let hdr = fs::read(&hdr_path).map_err(|e| format!("ERROR: Failed to read {}: {}", hdr_path.display(), e))?;
@@ -98,9 +110,34 @@ fn run_single(path: &Path) -> Result<(), String> {
         }
     }
 
-    if !hdr_path.exists() && !unk_path.exists() && !blackfin_path.exists() && !rif_path.exists() {
-        println!("Nothing to repair: {}", path.display());
-        return Ok(());
+    if footer_path.exists() {
+        let footer = fs::read(&footer_path).map_err(|e| format!("ERROR: Failed to read {}: {}", footer_path.display(), e))?;
+        file.seek(SeekFrom::End(0)).map_err(|e| format!("ERROR: {}", e))?;
+        file.write_all(&footer).map_err(|e| format!("ERROR: Failed to write footer: {}", e))?;
+        println!("Applied: {}", footer_path.display());
+    } else if let Some((_, target_size)) = dat.as_ref() {
+        let current_size = file.metadata().map_err(|e| format!("ERROR: {}", e))?.len();
+        if current_size < target_size {
+            file.seek(SeekFrom::End(0)).map_err(|e| format!("ERROR: {}", e))?;
+            let pad = target_size - current_size;
+            let zeros = vec![0u8; pad.min(8 * 1024 * 1024) as usize];
+            let mut remaining = pad;
+            while remaining > 0 {
+                let n = remaining.min(zeros.len() as u64) as usize;
+                file.write_all(&zeros[..n]).map_err(|e| format!("ERROR: Failed to pad file: {}", e))?;
+                remaining -= n as u64;
+            }
+            println!("Padded to {} bytes: {}", target_size, path.display());
+        }
+    }
+
+    drop(file);
+    if let Some((orig_name, _)) = dat {
+        let orig_path = path.with_file_name(&orig_name);
+        if orig_path != path {
+            fs::rename(path, &orig_path).map_err(|e| format!("ERROR: Failed to rename to {}: {}", orig_path.display(), e))?;
+            println!("Renamed: {} -> {}", path.display(), orig_path.display());
+        }
     }
 
     println!("Done: {}", path.display());

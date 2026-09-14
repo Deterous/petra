@@ -86,8 +86,21 @@ pub fn run(source: &Path) -> Result<(), String> {
         return Ok(());
     }
 
+    let img_end = data_offset + img_header.image_size() as u64 * BLOCK_SIZE;
+    let has_footer = if file_size > img_end {
+        let footer_len = (file_size - img_end) as usize;
+        let mut footer_buf = vec![0u8; footer_len];
+        reader.seek(SeekFrom::Start(img_end)).map_err(|e| format!("ERROR: {}", e))?;
+        reader.read_exact(&mut footer_buf).map_err(|e| format!("ERROR: Failed to read footer: {}", e))?;
+        common::save_footer(&footer_buf, &basename)?
+    } else {
+        false
+    };
+
     drop(reader);
     let mut file = File::options().read(true).write(true).open(source).map_err(|e| format!("ERROR: Failed to open {} for writing: {}", source.display(), e))?;
+    let (crc, md5, sha1, sha256) = common::hash_file(&mut file, file_size)?;
+    let name = source.file_name().unwrap_or_default().to_string_lossy();
     if has_header {
         let mut buf = vec![0u8; 8 * 1024 * 1024];
         let mut read_pos = HEADER_SKIP;
@@ -115,8 +128,34 @@ pub fn run(source: &Path) -> Result<(), String> {
         common::zero_range(&mut file, rif_start - data_offset + LIC1_OFFSET, LIC1_SIZE)?;
         common::zero_range(&mut file, rif_start - data_offset + LIC2_OFFSET, LIC2_SIZE)?;
     }
+    let trimmed_end = img_end - data_offset;
+    let current_len = if has_header { file_size - HEADER_SKIP } else { file_size };
+    if !has_footer && current_len > trimmed_end {
+        file.set_len(trimmed_end).map_err(|e| format!("ERROR: Failed to trim file to device size: {}", e))?;
+    }
     file.flush().map_err(|e| format!("ERROR: {}", e))?;
 
-    println!("Stripped: {}", source.display());
+    let stripped_size = file.metadata().map_err(|e| format!("ERROR: {}", e))?.len();
+    let (stripped_crc, stripped_md5, stripped_sha1, stripped_sha256) = common::hash_file(&mut file, stripped_size)?;
+    drop(file);
+
+    let stripped_path = source.with_extension("img");
+    if source != stripped_path {
+        std::fs::rename(source, &stripped_path).map_err(|e| format!("ERROR: Failed to rename to {}: {}", stripped_path.display(), e))?;
+        println!("Renamed: {} -> {}", source.display(), stripped_path.display());
+    }
+    let stripped_name = if source.extension().and_then(|e| e.to_str()) == Some("img") {
+        let stem = source.file_stem().unwrap_or_default().to_string_lossy();
+        format!("{}_stripped.img", stem)
+    } else {
+        stripped_path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    };
+    let dat_path = basename.with_extension("dat");
+    common::save_dat(&[
+        (&name, file_size, crc, md5.as_str(), sha1.as_str(), sha256.as_str()),
+        (&stripped_name, stripped_size, stripped_crc, stripped_md5.as_str(), stripped_sha1.as_str(), stripped_sha256.as_str()),
+    ], &dat_path)?;
+
+    println!("Stripped: {}", stripped_path.display());
     Ok(())
 }

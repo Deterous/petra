@@ -65,6 +65,11 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
     let name = path.file_stem().ok_or("ERROR: Can't get file name")?.to_string_lossy();
     let basename = parent.join(name.as_ref());
 
+    let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
+    let hash_path = parent.join(format!("{}.tsv", name));
+    let dat_path = basename.with_extension("dat");
+    let extract_dir = parent.join(name.as_ref());
+
     if extract {
         if data_offset > 0 {
             reader.seek(SeekFrom::Start(0)).map_err(|e| format!("ERROR: {}", e))?;
@@ -73,10 +78,6 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
             common::save_hdr(&hdr, &basename)?;
             reader.seek(SeekFrom::Start(data_offset + BLOCK_SIZE)).map_err(|e| format!("ERROR: {}", e))?;
         }
-
-        let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
-        let hash_path = parent.join(format!("{}.tsv", name));
-        let extract_dir = parent.join(name.as_ref());
 
         if skeleton_path.exists() {
             return Err(format!("ERROR: {} already exists", skeleton_path.display()));
@@ -87,11 +88,10 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
         if extract_dir.exists() {
             return Err(format!("ERROR: {} already exists", extract_dir.display()));
         }
+        if dat_path.exists() {
+            return Err(format!("ERROR: {} already exists", dat_path.display()));
+        }
     }
-
-    let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
-    let hash_path = parent.join(format!("{}.tsv", name));
-    let extract_dir = parent.join(name.as_ref());
 
     let mut skeleton_writer = if extract { Some(SkeletonWriter::new(&skeleton_path).map_err(|e| format!("ERROR: Failed to create skeleton: {}", e))?) } else { None };
 
@@ -148,11 +148,7 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
         process_gap(&mut reader, &mut skeleton_writer, pos, img_end.min(file_size), data_offset, &basename)?;
     }
 
-    if file_size < img_end {
-        if let Some(ref mut sw) = skeleton_writer {
-            sw.write_zeros(img_end - file_size).map_err(|e| format!("ERROR: Failed to write padding zeros: {}", e))?;
-        }
-    } else if file_size > img_end {
+    if file_size > img_end {
         let mut buf = vec![0u8; CHUNK_SIZE as usize];
         let mut remaining = file_size - img_end.max(pos);
         let mut has_nonzero = false;
@@ -167,10 +163,6 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
         if has_nonzero {
             println!("WARNING: File has {} bytes of non-zero data past the header image size", file_size - img_end);
         }
-        // TODO: Solve trimming
-        if let Some(ref mut sw) = skeleton_writer {
-            sw.write_zeros(file_size - img_end.max(pos)).map_err(|e| format!("ERROR: Failed to write trailing zeros to skeleton: {}", e))?;
-        }
     }
 
     if let Some(sw) = skeleton_writer {
@@ -178,6 +170,11 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
         hash::write_hash_file(&hash_path, &hash_entries).map_err(|e| format!("ERROR: Failed to write hash file: {}", e))?;
         println!("File hashes saved to: {}", hash_path.display());
         println!("Image skeleton saved to: {}", skeleton_path.display());
+
+        let mut file = File::open(path).map_err(|e| format!("ERROR: Failed to open for hashing: {}", e))?;
+        let (crc, md5, sha1, sha256) = common::hash_file(&mut file, file_size)?;
+        let original_name = path.file_name().unwrap_or_default().to_string_lossy();
+        common::save_dat(&[(&original_name, file_size, crc, &md5, &sha1, &sha256)], &dat_path)?;
     }
 
     validate_game(&file_data, &hash_entries);
