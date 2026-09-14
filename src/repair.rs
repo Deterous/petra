@@ -31,8 +31,8 @@ fn run_single(path: &Path) -> Result<(), String> {
     let mut data_offset: u64 = if has_header { HEADER_SKIP } else { 0 };
 
     if !hdr_path.exists() && !unk_path.exists() && !blackfin_path.exists() && !rif_path.exists() && !footer_path.exists() {
-        let needs_repair = dat.as_ref().map_or(false, |(original_name, &target_size)| {
-            file_size < target_size || path.with_file_name(original_name.as_str()) != path
+        let needs_repair = dat.as_ref().map_or(false, |(original_name, target_size)| {
+            file_size < *target_size || path.with_file_name(original_name.as_str()) != path
         });
         if !needs_repair {
             println!("Nothing to repair: {}", path.display());
@@ -115,9 +115,9 @@ fn run_single(path: &Path) -> Result<(), String> {
         file.seek(SeekFrom::End(0)).map_err(|e| format!("ERROR: {}", e))?;
         file.write_all(&footer).map_err(|e| format!("ERROR: Failed to write footer: {}", e))?;
         println!("Applied: {}", footer_path.display());
-    } else if let Some((_, &target_size)) = dat.as_ref() {
+    } else if let Some((_, target_size)) = dat.as_ref() {
         let current_size = file.metadata().map_err(|e| format!("ERROR: {}", e))?.len();
-        if current_size < target_size {
+        if current_size < *target_size {
             file.seek(SeekFrom::End(0)).map_err(|e| format!("ERROR: {}", e))?;
             let pad = target_size - current_size;
             let zeros = vec![0u8; pad.min(8 * 1024 * 1024) as usize];
