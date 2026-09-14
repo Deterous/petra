@@ -115,9 +115,9 @@ fn run_single(path: &Path) -> Result<(), String> {
         file.seek(SeekFrom::End(0)).map_err(|e| format!("ERROR: {}", e))?;
         file.write_all(&footer).map_err(|e| format!("ERROR: Failed to write footer: {}", e))?;
         println!("Applied: {}", footer_path.display());
-    } else if let Some(&(_, target_size)) = dat.as_ref() {
+    } else if let Some((_, target_size)) = dat.as_ref() {
         let current_size = file.metadata().map_err(|e| format!("ERROR: {}", e))?.len();
-        if current_size < target_size {
+        if current_size < *target_size {
             file.seek(SeekFrom::End(0)).map_err(|e| format!("ERROR: {}", e))?;
             let pad = target_size - current_size;
             let zeros = vec![0u8; pad.min(8 * 1024 * 1024) as usize];
