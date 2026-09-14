@@ -180,6 +180,7 @@ pub fn read_dat(basename: &Path) -> Result<Option<(String, u64)>, String> {
     let size: u64 = parse_attr("size").ok_or_else(|| format!("ERROR: Could not parse size from {}", path.display()))?.parse().map_err(|_| format!("ERROR: Invalid size in {}", path.display()))?;
     Ok(Some((name, size)))
 }
+
 pub fn check_file_size(file_size: u64, path: &Path) -> Result<(), String> {
     if file_size < 2 * BLOCK_SIZE {
         return Err(format!("ERROR: {} is too small to be a valid psvita image ({} bytes)", path.display(), file_size));
