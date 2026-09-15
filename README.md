@@ -2,7 +2,7 @@
 
 PlayStation Vita archival tool for extracting/transforming/rebuilding/analyzing physical game card dumps.  
 You may use this tool to losslessly normalize your game card dumps to formats ideal for archival.  
-It also supports file extracting, leaving behind a filesystem skeleton (dump image with all game data zeroed).
+It also supports file extracting, leaving behind a filesystem skeleton (dump image with all game data zeroed).  
 You can also use this tool to easily compare and verify PSN game dumps with game files on physical dumps.
 
 ## Extraction
@@ -17,10 +17,10 @@ Strips non-deterministic data from .img/.vci/.psv images, for normalization and 
 
 usage: `petra.exe strip example.img`
 
-**Note**: This will extract the unique data from the PSV/VCI header (.hdr), unknown header data (.unk), license (.rif) file, and BlackFin specific data (.blackfin) if it is present. The output files will overwrite any existing files.
+**Note**: This will extract the unique data from the PSV/VCI header (.hdr), unknown header data (.unk), license (.rif) file, footer data (.ftr), and BlackFin specific data (.blackfin) if it is present. The output files will overwrite any existing files.
 
 ## Repairing
-Applies given sidecar files (.hdr/.unk/.rif/.blackfin) to a normalized/stripped image, reverting back to the original unique dump file.
+Applies given sidecar files (.hdr/.unk/.rif/.ftr/.blackfin) to a normalized/stripped image, reverting back to the original unique dump file.
 
 usage: `petra.exe repair example.img`
 
