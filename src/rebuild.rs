@@ -13,7 +13,9 @@ use crate::skeleton;
 
 struct ScannedFile {
     path: PathBuf,
+    relative_path: String,
     size: u64,
+    sha256: Option<String>,
 }
 
 pub fn verify(input_dir: &Path) -> Result<(), String> {
@@ -30,16 +32,49 @@ pub fn verify(input_dir: &Path) -> Result<(), String> {
     }
 
     let hash_entries = hash::read_hash_file(&hash_path)?;
-    let matches = resolve_files(input_dir, &hash_entries)?;
+    let (matches, scanned) = resolve_files(input_dir, &hash_entries)?;
 
-    let unmatched: Vec<&HashEntry> = hash_entries.iter().enumerate().filter_map(|(idx, e)| if matches.contains_key(&idx) { None } else { Some(e) }).collect();
+    let matched_hashes: HashSet<(&str, u64)> = hash_entries.iter().map(|e| (e.sha256.as_str(), e.size)).collect();
 
-    if unmatched.is_empty() {
+    let unmatched_entries: Vec<&HashEntry> = hash_entries.iter().enumerate().filter_map(|(idx, e)| if matches.contains_key(&idx) { None } else { Some(e) }).collect();
+
+    let unmatched_tsv_paths: HashSet<&str> = unmatched_entries.iter().filter(|e| !e.path.is_empty()).map(|e| e.path.as_str()).collect();
+
+    let mut corrupted: Vec<&ScannedFile> = Vec::new();
+    let mut unexpected: Vec<&ScannedFile> = Vec::new();
+    for file in &scanned {
+        if let Some(ref sha256) = file.sha256 {
+            if matched_hashes.contains(&(sha256.as_str(), file.size)) {
+                continue;
+            }
+        }
+        if unmatched_tsv_paths.iter().any(|tsv| tsv.ends_with(file.relative_path.to_ascii_lowercase().as_str())) {
+            corrupted.push(file);
+        } else {
+            unexpected.push(file);
+        }
+    }
+
+    if unmatched_entries.is_empty() && corrupted.is_empty() && unexpected.is_empty() {
         println!("All {} files found and verified", hash_entries.len());
     } else {
-        println!("ERROR: {} file(s) missing or mismatched:", unmatched.len());
-        for entry in &unmatched {
-            println!("  sha256={} size={} ({})", entry.sha256, entry.size, entry.path);
+        if !unmatched_entries.is_empty() {
+            println!("ERROR: {} file(s) missing:", unmatched_entries.len());
+            for entry in &unmatched_entries {
+                println!("  sha256={} size={} ({})", entry.sha256, entry.size, entry.path);
+            }
+        }
+        if !corrupted.is_empty() {
+            println!("WARNING: {} file(s) present but hash mismatch:", corrupted.len());
+            for file in &corrupted {
+                println!("  {}", file.relative_path);
+            }
+        }
+        if !unexpected.is_empty() {
+            println!("WARNING: {} unexpected file(s) not in .tsv:", unexpected.len());
+            for file in &unexpected {
+                println!("  {}", file.relative_path);
+            }
         }
     }
 
@@ -57,7 +92,22 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
     let skeleton_zst_path = parent.join(format!("{}.skeleton.zst", name));
     let skeleton_raw_path = parent.join(format!("{}.skeleton", name));
     let hash_path = parent.join(format!("{}.tsv", name));
-    let output_path = parent.join(format!("{}.img", name));
+    let hdr_path = parent.join(format!("{}.hdr", name));
+    let output_ext = if hdr_path.exists() {
+        let mut magic = [0u8; 4];
+        File::open(&hdr_path)
+            .and_then(|mut f| f.read_exact(&mut magic).map(|_| magic))
+            .ok()
+            .and_then(|m| match &m {
+                b"PSV\0" => Some("psv"),
+                b"VCI\0" => Some("vci"),
+                _ => None,
+            })
+            .unwrap_or("img")
+    } else {
+        "img"
+    };
+    let output_path = parent.join(format!("{}.{}", name, output_ext));
 
     if output_path.exists() {
         return Err(format!("ERROR: Output already exists: {}", output_path.display()));
@@ -76,7 +126,7 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
     }
 
     let hash_entries = hash::read_hash_file(&hash_path)?;
-    let matches = resolve_files(input_dir, &hash_entries)?;
+    let (matches, _) = resolve_files(input_dir, &hash_entries)?;
 
     if matches.len() != hash_entries.len() {
         let mut unmatched = Vec::new();
@@ -132,11 +182,12 @@ pub fn run(input_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_files(input_dir: &Path, hash_entries: &[HashEntry]) -> Result<HashMap<usize, PathBuf>, String> {
+fn resolve_files(input_dir: &Path, hash_entries: &[HashEntry]) -> Result<(HashMap<usize, PathBuf>, Vec<ScannedFile>), String> {
     let expected_sizes: HashSet<u64> = hash_entries.iter().map(|e| e.size).collect();
     let mut scanned_files = Vec::new();
-    scan_recursive(input_dir, &mut scanned_files)?;
-    match_files(&scanned_files, hash_entries, &expected_sizes)
+    scan_recursive(input_dir, &mut scanned_files, input_dir)?;
+    let matches = match_files(&mut scanned_files, hash_entries, &expected_sizes)?;
+    Ok((matches, scanned_files))
 }
 
 fn insert_img_partitions(output_path: &Path, img_header: &header::ImgHeader, input_dir: &Path) -> Result<(), String> {
@@ -183,23 +234,24 @@ fn insert_img_partitions(output_path: &Path, img_header: &header::ImgHeader, inp
     Ok(())
 }
 
-fn scan_recursive(dir: &Path, files: &mut Vec<ScannedFile>) -> Result<(), String> {
+fn scan_recursive(dir: &Path, files: &mut Vec<ScannedFile>, root: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("ERROR: Failed to read directory {}: {}", dir.display(), e))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("ERROR: Failed to read entry in {}: {}", dir.display(), e))?;
         let path = entry.path();
         if path.is_dir() {
-            scan_recursive(&path, files)?;
+            scan_recursive(&path, files, root)?;
         } else if path.is_file() {
             let metadata = std::fs::metadata(&path).map_err(|e| format!("ERROR: Failed to read metadata for {}: {}", path.display(), e))?;
-            files.push(ScannedFile { path, size: metadata.len() });
+            let relative_path = path.strip_prefix(root).map(|p| format!("/{}", p.display()).replace('\\', "/")).unwrap_or_default();
+            files.push(ScannedFile { path, relative_path, size: metadata.len(), sha256: None });
         }
     }
     Ok(())
 }
 
-fn match_files(scanned: &[ScannedFile], entries: &[HashEntry], expected_sizes: &HashSet<u64>) -> Result<HashMap<usize, PathBuf>, String> {
+fn match_files(scanned: &mut [ScannedFile], entries: &[HashEntry], expected_sizes: &HashSet<u64>) -> Result<HashMap<usize, PathBuf>, String> {
     let mut lookup: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
     for (idx, entry) in entries.iter().enumerate() {
         lookup.entry((&entry.sha256, entry.size)).or_default().push(idx);
@@ -207,14 +259,16 @@ fn match_files(scanned: &[ScannedFile], entries: &[HashEntry], expected_sizes: &
 
     let mut matches: HashMap<usize, PathBuf> = HashMap::new();
 
-    for file in scanned {
+    for file in scanned.iter_mut() {
         if !expected_sizes.contains(&file.size) {
             continue;
         }
 
         let sha256 = hash_file(&file.path)?;
+        file.sha256 = Some(sha256);
+        let sha256 = file.sha256.as_deref().unwrap();
 
-        if let Some(entry_indices) = lookup.get(&(sha256.as_str(), file.size)) {
+        if let Some(entry_indices) = lookup.get(&(sha256, file.size)) {
             for &entry_idx in entry_indices {
                 matches.insert(entry_idx, file.path.clone());
             }
