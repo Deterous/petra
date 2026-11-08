@@ -87,15 +87,13 @@ pub fn run(source: &Path) -> Result<(), String> {
     }
 
     let img_end = data_offset + img_header.image_size() as u64 * BLOCK_SIZE;
-    let has_footer = if file_size > img_end {
+    if file_size > img_end {
         let footer_len = (file_size - img_end) as usize;
         let mut footer_buf = vec![0u8; footer_len];
         reader.seek(SeekFrom::Start(img_end)).map_err(|e| format!("ERROR: {}", e))?;
         reader.read_exact(&mut footer_buf).map_err(|e| format!("ERROR: Failed to read footer: {}", e))?;
-        common::save_footer(&footer_buf, &basename)?
-    } else {
-        false
-    };
+        common::save_footer(&footer_buf, &basename)?;
+    }
 
     drop(reader);
     let mut file = File::options().read(true).write(true).open(source).map_err(|e| format!("ERROR: Failed to open {} for writing: {}", source.display(), e))?;
@@ -130,7 +128,7 @@ pub fn run(source: &Path) -> Result<(), String> {
     }
     let trimmed_end = img_end - data_offset;
     let current_len = if has_header { file_size - HEADER_SKIP } else { file_size };
-    if !has_footer && current_len > trimmed_end {
+    if current_len > trimmed_end {
         file.set_len(trimmed_end).map_err(|e| format!("ERROR: Failed to trim file to device size: {}", e))?;
     }
     file.flush().map_err(|e| format!("ERROR: {}", e))?;

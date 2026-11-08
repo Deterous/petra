@@ -149,19 +149,13 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
     }
 
     if file_size > img_end {
-        let mut buf = vec![0u8; CHUNK_SIZE as usize];
-        let mut remaining = file_size - img_end.max(pos);
-        let mut has_nonzero = false;
-        while remaining > 0 {
-            let to_read = remaining.min(CHUNK_SIZE as u64) as usize;
-            reader.read_exact(&mut buf[..to_read]).map_err(|e| format!("ERROR: Failed to read trailing data: {}", e))?;
-            if !has_nonzero && buf[..to_read].iter().any(|&b| b != 0) {
-                has_nonzero = true;
-            }
-            remaining -= to_read as u64;
-        }
-        if has_nonzero {
-            println!("WARNING: File has {} bytes of non-zero data past the header image size", file_size - img_end);
+        let footer_len = (file_size - img_end) as usize;
+        let mut footer_buf = vec![0u8; footer_len];
+        reader.read_exact(&mut footer_buf).map_err(|e| format!("ERROR: Failed to read footer: {}", e))?;
+        if extract {
+            common::save_footer(&footer_buf, &basename)?;
+        } else if footer_buf.iter().any(|&b| b != 0) {
+            println!("WARNING: File has {} bytes of non-zero data past the header image size", footer_len);
         }
     }
 
