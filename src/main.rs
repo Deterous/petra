@@ -18,7 +18,7 @@ const EXE: &str = "petra.exe";
 const EXE: &str = "petra";
 
 fn usage() {
-    println!("PSVita extract/transform/rebuild/analyze (c) Deterous 2026");
+    println!("petra v{} - PSVita extract/transform/rebuild/analyze (c) Deterous 2026", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Usage:");
     println!("  {EXE} extract <image>     Extracts game files and creates skeleton");
