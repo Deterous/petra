@@ -67,7 +67,7 @@ fn run(path: &Path, extract: bool) -> Result<(), String> {
 
     let skeleton_path = parent.join(format!("{}.skeleton.zst", name));
     let hash_path = parent.join(format!("{}.tsv", name));
-    let dat_path = basename.with_extension("dat");
+    let dat_path = common::companion_path(&basename, "dat");
     let extract_dir = parent.join(name.as_ref());
 
     if extract {

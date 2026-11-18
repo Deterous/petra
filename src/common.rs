@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crc32fast::Hasher as Crc32Hasher;
 use sha1::Digest as Sha1Digest;
@@ -75,8 +75,17 @@ pub fn zero_range(file: &mut File, offset: u64, len: u64) -> Result<(), String> 
     file.write_all(&vec![0u8; len as usize]).map_err(|e| format!("ERROR: Failed to zero range at 0x{:X}: {}", offset, e))
 }
 
+// `basename` has already had the input extension removed. Append the
+// companion suffix without replacing a dotted part of the remaining name.
+pub fn companion_path(basename: &Path, extension: &str) -> PathBuf {
+    let mut path = basename.as_os_str().to_os_string();
+    path.push(".");
+    path.push(extension);
+    PathBuf::from(path)
+}
+
 pub fn save_hdr(data: &[u8], basename: &Path) -> Result<(), String> {
-    let path = basename.with_extension("hdr");
+    let path = companion_path(basename, "hdr");
     fs::write(&path, data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
     println!("Saved: {}", path.display());
     Ok(())
@@ -84,7 +93,7 @@ pub fn save_hdr(data: &[u8], basename: &Path) -> Result<(), String> {
 
 pub fn save_unk(data: &[u8], basename: &Path) -> Result<bool, String> {
     if data.iter().any(|&b| b != 0) {
-        let path = basename.with_extension("unk");
+        let path = companion_path(basename, "unk");
         fs::write(&path, data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
         println!("Saved: {}", path.display());
         return Ok(true);
@@ -94,7 +103,7 @@ pub fn save_unk(data: &[u8], basename: &Path) -> Result<bool, String> {
 
 pub fn save_blackfin(data: &[u8], basename: &Path) -> Result<bool, String> {
     if data.len() >= BLACKFIN_MAGIC.len() && &data[..BLACKFIN_MAGIC.len()] == BLACKFIN_MAGIC {
-        let path = basename.with_extension("blackfin");
+        let path = companion_path(basename, "blackfin");
         fs::write(&path, data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
         println!("Saved: {}", path.display());
         return Ok(true);
@@ -111,7 +120,7 @@ pub fn save_rif(data: &[u8], basename: &Path) -> Result<bool, String> {
     if data.len() != 0x200 {
         eprintln!("WARNING: Unexpected license file size: {} bytes", data.len());
     }
-    let path = basename.with_extension("rif");
+    let path = companion_path(basename, "rif");
     fs::write(&path, data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
     println!("Saved: {}", path.display());
     Ok(true)
@@ -119,7 +128,7 @@ pub fn save_rif(data: &[u8], basename: &Path) -> Result<bool, String> {
 
 pub fn save_footer(data: &[u8], basename: &Path) -> Result<bool, String> {
     if data.iter().any(|&b| b != 0) {
-        let path = basename.with_extension("ftr");
+        let path = companion_path(basename, "ftr");
         fs::write(&path, data).map_err(|e| format!("ERROR: Failed to write {}: {}", path.display(), e))?;
         println!("Saved: {}", path.display());
         return Ok(true);
@@ -165,7 +174,7 @@ pub fn save_dat(roms: &[(&str, u64, u32, &str, &str, &str)], path: &Path) -> Res
 }
 
 pub fn read_dat(basename: &Path) -> Result<Option<(String, u64)>, String> {
-    let path = basename.with_extension("dat");
+    let path = companion_path(basename, "dat");
     if !path.exists() {
         return Ok(None);
     }
@@ -190,4 +199,38 @@ pub fn check_file_size(file_size: u64, path: &Path) -> Result<(), String> {
 
 pub fn validate_sony_magic(data: &[u8]) -> bool {
     data.len() >= SONY_MAGIC.len() && &data[..SONY_MAGIC.len()] == SONY_MAGIC
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn companion_path_appends_to_the_entire_stem() {
+        for stem in ["game", "game.vol.2", "ラブライブ！ SIP Vol.2", ".hidden"] {
+            let basename = Path::new("directory.with.dots").join(stem);
+            for extension in ["dat", "hdr", "unk", "blackfin", "rif", "ftr"] {
+                assert_eq!(companion_path(&basename, extension), Path::new("directory.with.dots").join(format!("{}.{}", stem, extension)));
+            }
+        }
+    }
+
+    #[test]
+    fn companion_files_preserve_dots_and_unicode_in_the_basename() {
+        let dir = std::env::temp_dir().join(format!("petra-paths-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let name = "ラブライブ！ SIP Vol.2 BiBi [PCSG00423]";
+        let basename = dir.join(name);
+        save_hdr(b"header", &basename).unwrap();
+        assert!(save_unk(&[1], &basename).unwrap());
+        assert!(save_blackfin(BLACKFIN_MAGIC, &basename).unwrap());
+        assert!(save_rif(&[1; 512], &basename).unwrap());
+        assert!(save_footer(&[1], &basename).unwrap());
+        for extension in ["hdr", "unk", "blackfin", "rif", "ftr"] {
+            assert!(dir.join(format!("{}.{}", name, extension)).exists(), "missing {}", extension);
+        }
+        save_dat(&[("original.vci", 1024, 0, "md5", "sha1", "sha256")], &dir.join(format!("{}.dat", name))).unwrap();
+        assert_eq!(read_dat(&basename).unwrap(), Some(("original.vci".to_string(), 1024)));
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
