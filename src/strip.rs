@@ -148,7 +148,7 @@ pub fn run(source: &Path) -> Result<(), String> {
     } else {
         stripped_path.file_name().unwrap_or_default().to_string_lossy().into_owned()
     };
-    let dat_path = basename.with_extension("dat");
+    let dat_path = common::companion_path(&basename, "dat");
     common::save_dat(&[
         (&name, file_size, crc, md5.as_str(), sha1.as_str(), sha256.as_str()),
         (&stripped_name, stripped_size, stripped_crc, stripped_md5.as_str(), stripped_sha1.as_str(), stripped_sha256.as_str()),

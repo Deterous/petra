@@ -14,11 +14,11 @@ pub fn run(path: &Path) -> Result<(), String> {
 
 fn run_single(path: &Path) -> Result<(), String> {
     let basename = path.with_extension("");
-    let hdr_path = basename.with_extension("hdr");
-    let unk_path = basename.with_extension("unk");
-    let blackfin_path = basename.with_extension("blackfin");
-    let rif_path = basename.with_extension("rif");
-    let footer_path = basename.with_extension("ftr");
+    let hdr_path = common::companion_path(&basename, "hdr");
+    let unk_path = common::companion_path(&basename, "unk");
+    let blackfin_path = common::companion_path(&basename, "blackfin");
+    let rif_path = common::companion_path(&basename, "rif");
+    let footer_path = common::companion_path(&basename, "ftr");
     let dat = common::read_dat(&basename)?;
 
     let mut file = File::options().read(true).write(true).open(path).map_err(|e| format!("ERROR: Failed to open {}: {}", path.display(), e))?;
