@@ -25,9 +25,7 @@ pub const LIC2_SIZE: u64 = 0x160;
 
 pub fn is_license_rif_path(path: &str) -> bool {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let is_rif = parts.last().map_or(false, |name| {
-        name.rsplit_once('.').map_or(false, |(_, ext)| ext.eq_ignore_ascii_case("rif"))
-    });
+    let is_rif = parts.last().map_or(false, |name| name.ends_with(".rif"));
     is_rif
         && ((parts.len() == 4
             && parts[0].eq_ignore_ascii_case("license")
@@ -37,7 +35,8 @@ pub fn is_license_rif_path(path: &str) -> bool {
                 && parts[1].eq_ignore_ascii_case("addcont")))
 }
 
-pub fn find_rif(reader: &mut (impl Read + Seek), img_header: &header::ImgHeader, data_offset: u64) -> Result<Option<(u64, u64)>, String> {
+pub fn find_rifs(reader: &mut (impl Read + Seek), img_header: &header::ImgHeader, data_offset: u64) -> Result<Vec<(String, u64, u64)>, String> {
+    let mut rifs = Vec::new();
     for partition in &img_header.partitions {
         if partition.filesystem != header::FileSystem::ExFat {
             continue;
@@ -53,12 +52,12 @@ pub fn find_rif(reader: &mut (impl Read + Seek), img_header: &header::ImgHeader,
                 if let Some(&first_cluster) = file_info.chain.first() {
                     let cluster_offset = cluster_heap_start + (first_cluster as u64 - 2) * CLUSTER_SIZE as u64;
                     let abs_offset = data_offset + partition_start + cluster_offset;
-                    return Ok(Some((abs_offset, file_info.size)));
+                    rifs.push((file_info.path.clone(), abs_offset, file_info.size));
                 }
             }
         }
     }
-    Ok(None)
+    Ok(rifs)
 }
 
 pub fn iter_image_files(dir: &Path, mut f: impl FnMut(&Path) -> Result<(), String>) -> Result<(), String> {

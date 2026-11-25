@@ -373,7 +373,15 @@ fn process_exfat(
                 if is_license_rif[file_idx] && writer.is_some() {
                     if file_offset == 0 {
                         let verbatim = cluster_buf[..bytes_to_hash.min(ctx.files[file_idx].size as usize)].to_vec();
-                        common::save_rif(&verbatim, basename)?;
+                        let rif_path = &ctx.files[file_idx].path;
+                        let parts: Vec<&str> = rif_path.trim_start_matches('/').split('/').collect();
+                        let rif_basename = if parts[1].eq_ignore_ascii_case("addcont") {
+                            // If it's an additional content RIF, save it as basename.TitleID.rif
+                            common::companion_path(basename, parts[2])
+                        } else {
+                            basename.to_path_buf()
+                        };
+                        common::save_rif(&verbatim, &rif_basename)?;
                     }
                     if wipe_license_data(&mut cluster_buf, file_offset, bytes_to_hash) {
                         println!("Wiped unique license data from {}", ctx.files[file_idx].path);
@@ -645,8 +653,6 @@ fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
 
     if rif_count == 0 && addcont_rifs.is_empty() {
         println!("WARNING: No .rif file found in /license/app/ or /license/addcont/");
-    } else if rif_count > 0 && !addcont_rifs.is_empty() {
-        println!("WARNING: RIF files found in both /license/app/ and /license/addcont/");
     }
 
     if rif_count > 0 {
@@ -672,18 +678,18 @@ fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
     }
 
     if !addcont_rifs.is_empty() {
-        let mut folders = std::collections::HashSet::new();
-        let mut subfolders = std::collections::HashSet::new();
+        let mut subfolders = std::collections::HashMap::<&str, std::collections::HashSet<&str>>::new();
         for entry in &addcont_files {
             let parts: Vec<&str> = entry.path.trim_start_matches('/').split('/').collect();
-            folders.insert(parts[2]);
-            subfolders.insert((parts[2], parts[3]));
+            subfolders.entry(parts[2]).or_default().insert(parts[3]);
         }
-        if folders.len() > 1 {
-            println!("WARNING: Multiple folders found in /license/addcont/: {:?}", folders);
-        }
-        if subfolders.len() > 1 {
-            println!("WARNING: Multiple subfolders found in /license/addcont/: {:?}", subfolders);
+        for (folder, children) in subfolders {
+            if folder.len() != 9 {
+                println!("WARNING: /license/addcont/{} subfolder name is not 9 characters (got {})", folder, folder.len());
+            }
+            if children.len() > 1 {
+                println!("WARNING: Multiple subfolders found in /license/addcont/{}/: {:?}", folder, children);
+            }
         }
         for entry in &addcont_rifs {
             if entry.size != 0x200 {
@@ -693,9 +699,6 @@ fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
             if filename.len().saturating_sub(4) != 32 {
                 println!("WARNING: {} filename stem is not 32 characters", entry.path);
             }
-        }
-        if addcont_files.len() > 1 {
-            println!("WARNING: Multiple files found in /license/addcont/: {} files", addcont_files.len());
         }
     }
 

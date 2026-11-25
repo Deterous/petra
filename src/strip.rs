@@ -28,7 +28,10 @@ pub fn run(source: &Path) -> Result<(), String> {
     let blackfin_end = blackfin_start + BLACKFIN_SIZE;
     let unk_start = data_offset + UNK_OFFSET;
     let unk_end = unk_start + UNK_SIZE;
-    let (rif_start, rif_size) = common::find_rif(&mut reader, &img_header, data_offset)?.ok_or("ERROR: No .rif file found in image filesystem")?;
+    let rifs = common::find_rifs(&mut reader, &img_header, data_offset)?;
+    if rifs.is_empty() {
+        return Err("ERROR: No licenses (.rif file) found in image".to_string());
+    }
     let basename = source.with_extension("");
 
     reader.seek(SeekFrom::Start(blackfin_start)).map_err(|e| format!("ERROR: {}", e))?;
@@ -76,10 +79,23 @@ pub fn run(source: &Path) -> Result<(), String> {
     reader.read_exact(&mut unk_buf).map_err(|e| format!("ERROR: Failed to read unk region: {}", e))?;
     let has_unk = common::save_unk(&unk_buf, &basename)?;
 
-    reader.seek(SeekFrom::Start(rif_start)).map_err(|e| format!("ERROR: {}", e))?;
-    let mut rif = vec![0u8; rif_size as usize];
-    reader.read_exact(&mut rif).map_err(|e| format!("ERROR: Failed to read rif: {}", e))?;
-    let has_rif = common::save_rif(&rif, &basename)?;
+    let mut has_rif = false;
+    for (rif_path, rif_offset, rif_size) in &rifs {
+        reader.seek(SeekFrom::Start(*rif_offset)).map_err(|e| format!("ERROR: {}", e))?;
+        let mut data = vec![0u8; *rif_size as usize];
+        reader.read_exact(&mut data).map_err(|e| format!("ERROR: Failed to read rif: {}", e))?;
+        let parts: Vec<&str> = rif_path.trim_start_matches('/').split('/').collect();
+        let rif_basename = if parts[1].eq_ignore_ascii_case("app") {
+            basename.clone()
+        } else {
+            // If it's an additional content RIF, save it as basename.TitleID.rif
+            common::companion_path(&basename, parts[2])
+        };
+        if common::save_rif(&data, &rif_basename)? {
+            has_rif = true;
+            println!("INFO: Wiping unique license data from {}", rif_path);
+        }
+    }
 
     if !has_header && !has_blackfin && !has_unk && !has_rif {
         println!("Image already clean: {}", source.display());
@@ -123,8 +139,10 @@ pub fn run(source: &Path) -> Result<(), String> {
         common::zero_range(&mut file, blackfin_start - data_offset, BLACKFIN_SIZE)?;
     }
     if has_rif {
-        common::zero_range(&mut file, rif_start - data_offset + LIC1_OFFSET, LIC1_SIZE)?;
-        common::zero_range(&mut file, rif_start - data_offset + LIC2_OFFSET, LIC2_SIZE)?;
+        for (_, rif_offset, _) in &rifs {
+            common::zero_range(&mut file, *rif_offset - data_offset + LIC1_OFFSET, LIC1_SIZE)?;
+            common::zero_range(&mut file, *rif_offset - data_offset + LIC2_OFFSET, LIC2_SIZE)?;
+        }
     }
     let trimmed_end = img_end - data_offset;
     let current_len = if has_header { file_size - HEADER_SKIP } else { file_size };
