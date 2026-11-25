@@ -305,14 +305,7 @@ fn process_exfat(
     let mut remaining_bytes: Vec<u64> = ctx.files.iter().map(|f| f.size).collect();
     let mut file_writers: Vec<Option<BufWriter<File>>> = Vec::with_capacity(num_files);
 
-    let is_license_rif: Vec<bool> = ctx
-        .files
-        .iter()
-        .map(|f| {
-            let parts: Vec<&str> = f.path.trim_start_matches('/').split('/').collect();
-            parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") && parts[3].ends_with(".rif")
-        })
-        .collect();
+    let is_license_rif: Vec<bool> = ctx.files.iter().map(|f| common::is_license_rif_path(&f.path)).collect();
 
     let sfo_idx = ctx.files.iter().position(|f| f.path.eq_ignore_ascii_case("/gc/param.sfo"));
     let pup_idx = ctx.files.iter().position(|f| f.path.eq_ignore_ascii_case("/psp2/update/psp2updat.pup"));
@@ -517,7 +510,7 @@ fn psf_ver_bytes(val: &[u8]) -> Option<[u8; 4]> {
     if val.len() >= 4 { Some([val[0], val[1], val[2], val[3]]) } else { None }
 }
 
-const KNOWN_PSF_KEYS: &[&str] = &["TITLE_ID", "CATEGORY", "VERSION", "PSP2_SYSTEM_VER", "PSP2_SYSTEM_ROOT_VER", "PSP2_DISP_VER", "SYSPRM"];
+const KNOWN_PSF_KEYS: &[&str] = &["TITLE_ID", "CATEGORY", "VERSION", "PSP2_SYSTEM_VER", "PSP2_SYSTEM_ROOT_VER", "PSP2_DISP_VER", "SYSPRM", "ACINST_TITLE", "ACINST_TITLE_ID_0", "ACINST_SIZE_0"];
 
 fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
     let psf = file_data.sfo.as_deref().and_then(parse_sfo_psf).map(parse_psf);
@@ -636,10 +629,27 @@ fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
         })
         .map(|e| e.path.as_str())
         .collect();
+    let addcont_files: Vec<&HashEntry> = hash_entries
+        .iter()
+        .filter(|e| {
+            let parts: Vec<&str> = e.path.trim_start_matches('/').split('/').collect();
+            parts.len() == 5 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("addcont")
+        })
+        .collect();
+    let addcont_rifs: Vec<&HashEntry> = addcont_files
+        .iter()
+        .copied()
+        .filter(|e| common::is_license_rif_path(&e.path))
+        .collect();
     let rif_count = app_files.iter().filter(|p| p.ends_with(".rif")).count();
-    if rif_count == 0 {
-        println!("WARNING: No .rif file found in /license/app/");
-    } else {
+
+    if rif_count == 0 && addcont_rifs.is_empty() {
+        println!("WARNING: No .rif file found in /license/app/ or /license/addcont/");
+    } else if rif_count > 0 && !addcont_rifs.is_empty() {
+        println!("WARNING: RIF files found in both /license/app/ and /license/addcont/");
+    }
+
+    if rif_count > 0 {
         for entry in hash_entries.iter().filter(|e| {
             let parts: Vec<&str> = e.path.trim_start_matches('/').split('/').collect();
             parts.len() == 4 && parts[0].eq_ignore_ascii_case("license") && parts[1].eq_ignore_ascii_case("app") && parts[3].ends_with(".rif")
@@ -661,6 +671,34 @@ fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
         }
     }
 
+    if !addcont_rifs.is_empty() {
+        let mut folders = std::collections::HashSet::new();
+        let mut subfolders = std::collections::HashSet::new();
+        for entry in &addcont_files {
+            let parts: Vec<&str> = entry.path.trim_start_matches('/').split('/').collect();
+            folders.insert(parts[2]);
+            subfolders.insert((parts[2], parts[3]));
+        }
+        if folders.len() > 1 {
+            println!("WARNING: Multiple folders found in /license/addcont/: {:?}", folders);
+        }
+        if subfolders.len() > 1 {
+            println!("WARNING: Multiple subfolders found in /license/addcont/: {:?}", subfolders);
+        }
+        for entry in &addcont_rifs {
+            if entry.size != 0x200 {
+                println!("WARNING: {} is {} bytes, expected 0x200", entry.path, entry.size);
+            }
+            let filename = entry.path.trim_start_matches('/').split('/').nth(4).unwrap_or("");
+            if filename.len().saturating_sub(4) != 32 {
+                println!("WARNING: {} filename stem is not 32 characters", entry.path);
+            }
+        }
+        if addcont_files.len() > 1 {
+            println!("WARNING: Multiple files found in /license/addcont/: {} files", addcont_files.len());
+        }
+    }
+
     let app_dirs: std::collections::HashSet<&str> = hash_entries
         .iter()
         .filter_map(|e| {
@@ -669,7 +707,9 @@ fn validate_game(file_data: &FileData, hash_entries: &[HashEntry]) {
         })
         .collect();
     if app_dirs.is_empty() {
-        println!("WARNING: No /app/ folder found");
+        if addcont_rifs.is_empty() {
+            println!("WARNING: No /app/ folder found");
+        }
     } else if app_dirs.len() > 1 {
         println!("WARNING: Multiple subfolders found in /app/: {:?}", app_dirs);
     } else {
